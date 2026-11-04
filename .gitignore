@@ -1,0 +1,16 @@
+# secrets / local state
+/.env
+/data/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# editor / tool / OS noise
+.DS_Store
+.vscode/
+.bob/
+*.jarbobo

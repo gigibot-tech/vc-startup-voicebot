@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="de" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HTGF Startup Voice Intake</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="htgf-background-animation" aria-hidden="true"></div>
+
+  <div class="app layout-top layout-dossier-below layout-main-classic" id="app">
+    <header class="topbar" id="topbar">
+      <div class="logo">HTGF <span>Voice Intake</span></div>
+      <div class="nav-actions">
+        <span class="mode-badge" id="modeBadge">Web Speech · de-DE</span>
+        <label class="top-field">
+          <span class="sr-only">Gespräch</span>
+          <!-- [Gespräch wählen] dropdown -> sessions/ui/lifecycle.js openSession(id)
+               -> GET /api/sessions/{id}   (sessions/routes.py get_session). Empty value = back to the picker. -->
+          <select id="sessionPick" aria-label="Gespräch wählen"></select>
+        </label>
+        <!-- [Neues Gespräch] -> lifecycle.js bind(): GET /api/sessions + show picker. Creates nothing yet. -->
+        <button class="pill" type="button" id="newBtn">
+          <span class="classic-only">Neues Gespräch</span>
+          <span class="compact-only">+ Neu</span>
+        </button>
+        <!-- [Einstellungen] -> prefs/ui/settings.js: show/hide the settings bar. localStorage only, NO backend. -->
+        <button class="pill-outline" type="button" id="prefsToggle" aria-expanded="true" aria-controls="prefsBar">Einstellungen</button>
+        <div class="voice-mini compact-only">
+          <div class="voice-orb" id="voiceOrbTop" aria-hidden="true"></div>
+          <div>
+            <span class="name">HTGF Intake Analyst</span>
+            <span class="position" id="voiceStatusTop">Bereit</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- SETTINGS BAR: every control below is handled by prefs/ui/settings.js and stored in localStorage.
+         None of them calls the backend. STT/Sprachausgabe values are read by voice.js on the next use. -->
+    <div class="prefs-bar" id="prefsBar">
+      <div class="prefs-group" aria-label="Sprache">
+        <span class="prefs-group-label">Sprache</span>
+        <label class="setting setting-row"><span>STT</span>
+          <select id="sttSel" aria-label="Spracherkennung">
+            <option value="elevenlabs">ElevenLabs</option>
+            <option value="deepgram">Deepgram</option>
+            <option value="browser">Web Speech</option>
+          </select>
+        </label>
+        <label class="setting setting-row" title="Gilt für neue Gespräche. Ein laufendes Gespräch behält seine Sprache.">
+          <span>Gesprächssprache</span>
+          <select id="langSel"><option value="de-DE">Deutsch</option><option value="en-US">English</option></select>
+        </label>
+      </div>
+      <div class="prefs-group" aria-label="Sprachausgabe">
+        <span class="prefs-group-label">Sprachausgabe</span>
+        <label class="setting setting-row"><span>Antworten vorlesen</span><input type="checkbox" id="voiceOn" checked /></label>
+        <fieldset class="voice-deps" id="voiceDeps">
+          <label class="setting setting-row"><span>Tempo</span>
+            <select id="voiceSpeedSel" aria-label="Sprechgeschwindigkeit">
+              <option value="0.75">0,75×</option>
+              <option value="0.9">0,9×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.1">1,1×</option>
+              <option value="1.2">1,2×</option>
+            </select>
+          </label>
+          <label class="setting setting-row" title="Stabilität — höher = ruhiger">
+            <span>Stabilität</span>
+            <input type="range" id="stabilityRange" min="0" max="100" value="45" />
+            <span class="range-val" id="stabilityVal">0,45</span>
+          </label>
+          <label class="setting setting-row" title="Ähnlichkeit zur Voice">
+            <span>Ähnlichkeit</span>
+            <input type="range" id="similarityRange" min="0" max="100" value="75" />
+            <span class="range-val" id="similarityVal">0,75</span>
+          </label>
+          <label class="setting setting-row" title="Nach der Antwort automatisch weiter zuhören">
+            <span>Weiterhören</span><input type="checkbox" id="autoListen" />
+          </label>
+        </fieldset>
+      </div>
+      <details class="fold" id="layoutPanel">
+        <summary>Layout</summary>
+        <div class="prefs-group" aria-label="Layout">
+          <label class="setting setting-row"><span>Theme</span>
+            <select id="themeSel"><option value="light">Hell</option><option value="dark">Dunkel</option><option value="system">System</option></select>
+          </label>
+          <label class="setting setting-row"><span>Main</span>
+            <select id="mainSel">
+              <option value="classic">HTGF Hero</option>
+              <option value="compact">Compact Chat</option>
+            </select>
+          </label>
+          <label class="setting setting-row"><span>Nav</span>
+            <select id="navSel"><option value="top">Oben</option><option value="side">Links</option></select>
+          </label>
+          <label class="setting setting-row"><span>Dossier</span>
+            <select id="dossierSel"><option value="below">Unten</option><option value="side">Rechts</option></select>
+          </label>
+        </div>
+      </details>
+      <!-- SYSTEM PROMPT (server-side config; handled by interview/ui/config-editor.js)
+           [Prompt speichern] -> PUT  /api/interview-config        (interview/routes.py put_interview_config)
+           [Defaults]         -> POST /api/interview-config/reset
+           No LLM call; the new text is used from the NEXT turn. -->
+      <details class="fold prefs-prompt" id="systemPromptPanel">
+        <summary>System-Prompt</summary>
+        <p class="prefs-hint">Steuert den Interview-Stil (Antworten). Begrüßung = erster Satz neuer Gespräche.</p>
+        <label class="setting">
+          <span>Begrüßung</span>
+          <textarea id="greetingInput" rows="2" spellcheck="true"></textarea>
+        </label>
+        <label class="setting">
+          <span>System-Prompt (Antworten)</span>
+          <textarea id="systemPromptInput" rows="6" spellcheck="true"></textarea>
+        </label>
+        <div class="prefs-prompt-actions">
+          <!-- same PUT as [Katalog speichern]: prompt + catalog are one document -->
+          <button class="pill" type="button" id="savePromptBtn">Prompt speichern</button>
+          <button class="pill-outline" type="button" id="resetPromptBtn">Defaults</button>
+          <span class="prefs-save-status" id="promptSaveStatus" aria-live="polite"></span>
+        </div>
+      </details>
+    </div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Gespräche (Seitenleiste)">
+      <div class="side-section-title">Gespräche</div>
+      <nav class="session-list" id="sessionList"></nav>
+    </aside>
+
+    <div class="main-col">
+      <div class="chat">
+        <main class="chat-scroll" id="chatScroll">
+          <section class="manager-grid classic-only" aria-label="Hero">
+            <div class="htgf-team-card">
+              <div class="voice-orb" id="voiceOrb" aria-hidden="true"></div>
+              <div class="card-glass">
+                <span class="name">HTGF Intake Analyst</span>
+                <span class="position" id="voiceStatus">Bereit</span>
+              </div>
+            </div>
+            <div class="hero">
+              <h1>Dein Startup</h1>
+              <h2><em>im HTGF Erstgespräch</em></h2>
+              <p class="lead" id="sessionHint">Gespräch oben wählen oder neu starten.</p>
+              <div class="hero-controls">
+                <!-- [Sprechen] (hero) -> voice.js onMicClick: speech-to-text ONLY. The transcript is handed to
+                     interview/ui/chat.js sendText() via onTranscript (wired in app.js). Mic itself never calls the LLM. -->
+                <button class="mic-btn mic-btn--hero" type="button" id="micBtnHero" aria-pressed="false">
+                  <span class="mic-btn__dot" aria-hidden="true"></span>
+                  <span class="mic-btn__label">Sprechen</span>
+                </button>
+              </div>
+            </div>
+          </section>
+          <p class="lead compact-only" id="sessionHintCompact">Gespräch oben wählen oder neu starten.</p>
+          <section class="chat-home" id="chatHome" hidden>
+            <h3>Gespräch wählen</h3>
+            <p class="lead">Bestehendes Gespräch öffnen oder ein neues starten — ohne sofortigen Voice-Start.</p>
+            <div class="home-list" id="homeSessionList"></div>
+            <!-- [Neues Gespräch jetzt starten] -> lifecycle.js startSession()
+                 -> POST /api/sessions {language}  (sessions/routes.py start_session; no LLM call) -->
+            <button class="pill" type="button" id="confirmNewBtn">Neues Gespräch jetzt starten</button>
+          </section>
+          <section class="qa-list" id="qaList" aria-live="polite"></section>
+          <!-- PROPOSAL CARDS ("git diff" of dossier fields) - painted by dossier/ui/proposals.js.
+               [✓ Speichern] / [✓ Alle gewählten speichern]
+               -> POST /api/sessions/{id}/dossier/resolve (dossier/routes.py resolve_dossier; no LLM).
+               Cards exist only while the server holds open `pending` suggestions for the session. -->
+          <section class="proposal-list" id="proposalList" hidden aria-live="polite"></section>
+        </main>
+        <!-- COMPOSER: all three inputs below end in interview/ui/chat.js sendText(text)
+             -> POST /api/sessions/{id}/turn/stream (SSE; interview/routes.py turn_stream) = the ONLY LLM path.
+             Reply text streams into the chat bubble, then voice.speak(reply) -> POST /api/tts. -->
+        <section class="reply-bar" id="replyBar" aria-label="Antwort">
+          <div class="composer" id="composer">
+            <!-- [Enter] -> chat.js submitInput() -> sendText() -->
+            <input id="textInput" type="text" aria-label="Antwort schreiben" placeholder="Antwort schreiben…" autocomplete="off" />
+            <!-- [Sprechen] (bar) -> voice.js STT -> onTranscript -> sendText(). Same as the hero mic. -->
+            <button class="mic-btn mic-btn--bar" type="button" id="micBtn" aria-pressed="false">
+              <span class="mic-btn__dot" aria-hidden="true"></span>
+              <span class="mic-btn__label">Sprechen</span>
+            </button>
+            <!-- [Senden] -> chat.js submitInput() -> sendText() -->
+            <button class="pill" type="button" id="sendBtn">Senden</button>
+          </div>
+          <p class="composer-hint" id="composerHint" hidden>Antwort wird verarbeitet…</p>
+        </section>
+      </div>
+
+      <aside class="dossier-panel" id="dossierPanel" aria-label="Live-Dossier">
+        <div class="dossier-shell">
+          <div class="dossier-head">
+            <h2>Live-<em>Dossier</em></h2>
+            <span class="dossier-chip" title="Dossier-Fortschritt"><span id="dossierPct">0%</span></span>
+          </div>
+          <p class="dossier-meta" id="dossierMeta">Kein Gespräch geladen</p>
+          <div class="progress" aria-label="Fortschritt"><span id="progressBar"></span></div>
+          <div class="slots" id="slots"></div>
+          <!-- FRAGENKATALOG (interview/ui/config-editor.js)
+               [Katalog speichern] -> PUT /api/interview-config   [Defaults] -> POST /api/interview-config/reset -->
+          <details class="fold catalog-panel" id="catalogPanel">
+            <summary>Fragenkatalog</summary>
+            <p class="prefs-hint">Blueprint-Fragen pro Dimension — der Agent paraphrasiert sie im Gespräch.</p>
+            <div class="catalog-fields" id="catalogFields"></div>
+            <div class="prefs-prompt-actions">
+              <button class="pill" type="button" id="saveCatalogBtn">Katalog speichern</button>
+              <button class="pill-outline" type="button" id="resetCatalogBtn">Defaults</button>
+              <span class="prefs-save-status" id="catalogSaveStatus" aria-live="polite"></span>
+            </div>
+          </details>
+          <!-- DOSSIER ACTIONS (dossier/ui/actions.js + render.js)
+               [Markdown] [PDF] [JSON]  plain download links; render.js sets href:
+                   GET /api/sessions/{id}/dossier.md | dossier.pdf | /api/sessions/{id}   (dossier/routes.py)
+               [Dossier leeren]   -> confirm -> POST   /api/sessions/{id}/clear   (no LLM; chat stays)
+               [Gespräch löschen] -> confirm -> DELETE /api/sessions/{id}         (removes files on disk) -->
+          <div class="exports">
+            <a class="pill-outline" id="downloadMd" href="#" download title="Lesbares Markdown">Markdown</a>
+            <a class="pill-outline" id="downloadPdf" href="#" download title="Druckfertiges PDF">PDF</a>
+            <a class="pill-outline" id="downloadJson" href="#" download title="Rohdaten session.json">JSON</a>
+            <button class="pill-outline" type="button" id="clearBtn" title="Nur Slot-Felder leeren, Chat bleibt">Dossier leeren</button>
+            <button class="pill-outline danger" type="button" id="deleteBtn" title="Gespräch + Dossier vom Server löschen">Gespräch löschen</button>
+          </div>
+          <div class="finalize-block">
+            <!-- [Dossier abschließen] -> actions.js finalize(): confirm if weak, then
+                 POST /api/sessions/{id}/finalize (interview/routes.py; 1 LLM call for the spoken summary),
+                 then back to the picker. -->
+            <button class="pill" type="button" id="finalizeBtn">Dossier abschließen</button>
+            <p class="finalize-hint" id="finalizeHint">Am Ende: prüft Vollständigkeit und ob schon abgeschlossen.</p>
+          </div>
+          <p class="action-hint">
+            <strong>Dossier abschließen</strong> = Summary + fertig (mit Warnung).
+            <strong>Markdown / PDF / JSON</strong> = Export.
+            <strong>Dossier leeren</strong> = Felder reset.
+            <strong>Gespräch löschen</strong> = Chat + Dateien weg.
+          </p>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
