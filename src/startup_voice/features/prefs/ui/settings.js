@@ -11,7 +11,7 @@
  * Tempo / Stabilität / Ähnlichkeit      #voiceSpeedSel #stabilityRange #similarityRange
  *                                       parameters sent with the NEXT POST /api/tts request
  * Weiterhören           #autoListen     re-open the mic after each spoken reply
- * Theme / Main / Nav / Dossier          #themeSel #mainSel #navSel #dossierSel  CSS layout classes
+ * Theme / Main / Nav / Dossier          .icon-toggle[data-pref]  one icon button each, flips between 2 values
  *
  * (System prompt + question catalog are NOT here: they are server-side, see
  *  features/interview/ui/config-editor.js.)
@@ -64,14 +64,39 @@ export function createSettings({ voice, onMetaChange }) {
     $("voiceOn").checked = prefs.voice;
     if ($("voiceSpeedSel")) $("voiceSpeedSel").value = String(clampSpeed(prefs.speed));
     $("autoListen").checked = prefs.auto;
-    $("themeSel").value = prefs.theme;
-    $("mainSel").value = prefs.main === "compact" ? "compact" : "classic";
-    $("navSel").value = prefs.nav;
-    $("dossierSel").value = prefs.dossier;
     syncToneUi();
     syncVoiceDeps();
     applyTheme();
     applyLayout();
+    syncToggles();
+  }
+
+  /** Icon toggles: show only the icon of the current value; title says what a click does. */
+  function syncToggles() {
+    document.querySelectorAll(".icon-toggle").forEach((btn) => {
+      const key = btn.dataset.pref;
+      const spans = [...btn.querySelectorAll("[data-v]")];
+      let cur = prefs[key];
+      if (key === "theme" && cur === "system") cur = themeMq.matches ? "dark" : "light";
+      if (!spans.some((el) => el.dataset.v === cur)) cur = spans[0].dataset.v;
+      const here = spans.find((el) => el.dataset.v === cur);
+      const other = spans.find((el) => el !== here);
+      spans.forEach((el) => { el.hidden = el !== here; });
+      btn.title = `${here.dataset.title} – klicken für ${other.dataset.title}`;
+    });
+  }
+
+  function flipToggle(btn) {
+    const key = btn.dataset.pref;
+    const values = [...btn.querySelectorAll("[data-v]")].map((el) => el.dataset.v);
+    let cur = prefs[key];
+    if (key === "theme" && cur === "system") cur = themeMq.matches ? "dark" : "light";
+    prefs[key] = values[(values.indexOf(cur) + 1) % values.length];
+    savePrefs();
+    if (key === "theme") applyTheme();
+    else applyLayout();
+    if (key === "main") onMetaChange();
+    syncToggles();
   }
 
   /** Bind a <select>/<checkbox>/<range> to one pref: store it, then run `after`. */
@@ -84,7 +109,7 @@ export function createSettings({ voice, onMetaChange }) {
   }
 
   function bind() {
-    themeMq.addEventListener("change", applyTheme);
+    themeMq.addEventListener("change", () => { applyTheme(); syncToggles(); });
     $("prefsToggle")?.addEventListener("click", () => {
       prefs.prefsOpen = !prefs.prefsOpen;
       savePrefs();
@@ -103,10 +128,9 @@ export function createSettings({ voice, onMetaChange }) {
       });
     });
     bindPref("autoListen", "change", (e) => e.checked, "auto");
-    bindPref("themeSel", "change", (e) => e.value, "theme", applyTheme);
-    bindPref("mainSel", "change", (e) => e.value, "main", () => { applyLayout(); onMetaChange(); });
-    bindPref("navSel", "change", (e) => e.value, "nav", applyLayout);
-    bindPref("dossierSel", "change", (e) => e.value, "dossier", applyLayout);
+    document.querySelectorAll(".icon-toggle").forEach((btn) => {
+      btn.addEventListener("click", () => flipToggle(btn));
+    });
   }
 
   return { paint, bind, syncToneUi };

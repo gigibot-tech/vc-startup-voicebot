@@ -20,7 +20,7 @@
  * BUTTON -> HANDLER -> BACKEND   (backend docs: features/interview/routes.py)
  * ==========================================================================
  *   [Senden]  #sendBtn, [Enter] in #textInput  -> submitInput() -> sendText()
- *   [Sprechen] #micBtn / #micBtnHero           -> voice.onMicClick (STT only) -> onTranscript
+ *   [Sprechen] #micBtn                         -> voice.onMicClick (STT only) -> onTranscript
  *                                                 -> sendText()
  */
 
@@ -132,7 +132,6 @@ export function createChat({ voice, sessions }) {
   function bind() {
     // [Sprechen] - STT only; the transcript comes back through onTranscript -> sendText.
     document.getElementById("micBtn").addEventListener("click", voice.onMicClick);
-    document.getElementById("micBtnHero")?.addEventListener("click", voice.onMicClick);
     // [Senden] and [Enter]
     document.getElementById("sendBtn").addEventListener("click", submitInput);
     textInput.addEventListener("keydown", (e) => {

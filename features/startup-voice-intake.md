@@ -11,17 +11,21 @@ grouping by technical layer (`static/js/*` vs flat `*.py`).
 
 ```
 startup_voice/
-  web.py, pipeline.py, store.py, domain.py, …   # shell / core
-  static/app.js, styles.css, shared/{api,format}.js
+  domain.py, language.py        # shared core
+  web.py                        # composition root: mounts each feature's router
+  static/app.js, index.html, styles.css, shared/{api,state,format,diff}.js
   features/
-    dossier/   markdown.py, pdf.py, fonts/, ui/dossier-schema.js
-    voice/     stt.py, tts.py, bridge.py, ui/voice.js
-    sessions/  ui/session-list.js
-    prefs/     ui/prefs.js
+    interview/ llm.py, prompts.py, config.py, pipeline.py, routes.py, ui/{chat,config-editor}.js
+    dossier/   scoring.py, review.py, markdown.py, pdf.py, fonts/, routes.py,
+               ui/{dossier-schema,render,actions,proposals}.js
+    sessions/  store.py, registry.py, routes.py, ui/{lifecycle,session-list,meta}.js
+    voice/     stt.py, tts.py, bridge.py, routes.py, ui/voice.js
+    prefs/     ui/{prefs,settings}.js
 ```
 
 UI is served as `/static/features/<name>/…` from each feature’s `ui/` folder.
-`static/app.js` is the composition shell that imports feature modules.
+`static/app.js` only creates the feature modules, wires them and boots. Each `routes.py` and UI
+module documents which button triggers which backend flow.
 
 ## Voice modes
 
@@ -38,7 +42,7 @@ UI is served as `/static/features/<name>/…` from each feature’s `ui/` folder
 UI session picker loads `GET /api/sessions` and resumes `session.json` from disk.
 
 ### Default layout
-- **Main = HTGF Hero** (team card + „Dein Startup / Erstgespräch“ — earlier look)
+- **Main = HTGF Hero** (team card + „Dein Startup / Erstgespräch“ — earlier look); the single **Sprechen** button sits next to the text box
 - Optional Main = Compact Chat
 - **Nav oben** + **Dossier unter dem Chat** (rounded card in Hero mode)
 - Optional: Nav links / Dossier rechts
@@ -75,9 +79,10 @@ Persistenz: `data/sessions/interview_config.json` (Server-SSOT für Prompt + Kat
 
 ## Collect vs score
 
-1. **fill_objects** — **LLM JSON extract** into `objects/<slot>.json` (no keyword snippets)
-2. **evaluate** — deterministic coverage/specificity on files (no LLM)
-3. **decide_reply** — ask next gap or finalize → `steps/turn_XX.json` + `dossier.md`
+1. **fill_objects** — **LLM JSON extract**; every value goes through the review gate (`dossier/review.py`):
+   empty field → written, differing from a filled field → proposal card (old / new / manual), nothing overwritten
+2. **evaluate** — deterministic coverage/specificity on the accepted values (no LLM)
+3. **decide_reply** — ask next gap (**streamed** via `POST /api/sessions/{id}/turn/stream`) → `steps/turn_XX.json` + `dossier.md`
 
 Run with Ollama (`granite4.2:8b` default). Extract + reply + summary are **LLM-only** (no heuristic fallback). Deterministic file scoring remains for coverage.
 
@@ -89,8 +94,7 @@ Run with Ollama (`granite4.2:8b` default). Extract + reply + summary are **LLM-o
 
 ```bash
 cd webapps/startup-voice-agent
-uv sync
-uv run startup-voice
+./run.sh        # or: uv sync && uv run startup-voice
 # http://127.0.0.1:8140/
 ```
 

@@ -6,7 +6,7 @@ What happens with a transcript is decided by the browser (see interview/routes.p
 BUTTON -> BACKEND FLOWS  (browser code: features/voice/ui/voice.js)
 ====================================================================
 
-[Sprechen]  (#micBtn bar / #micBtnHero hero)  - three steps, the first two before recording
+[Sprechen]  (#micBtn, next to the text box)  - three steps, the first two before recording
     1. voice.js voicePreflight()  -> POST /api/voice/preflight {stt, check_tts:false}
          -> voice_preflight() below: quick DNS/key probe of the chosen cloud STT.
          <- {mic: {ok, use}}  where use = "elevenlabs" | "deepgram" | "browser".

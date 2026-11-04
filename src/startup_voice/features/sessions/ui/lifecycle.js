@@ -9,7 +9,7 @@
  * [Neues Gespräch jetzt starten] #confirmNewBtn -> startSession()
  *                                                POST /api/sessions {language}  (no LLM call; the
  *                                                server returns an empty session + greeting)
- * [Gespräch wählen] #sessionPick, sidebar entries, home list, ?s=<id>, browser back button
+ * [Gespräch wählen] sidebar entries, home list, ?s=<id>, browser back button
  *                                             -> openSession(id)
  *                                                GET /api/sessions/{id}
  *
@@ -42,7 +42,6 @@ export function syncUrl() {
  *   prefLanguage - language picked in the settings bar; used for NEW conversations only
  */
 export function createSessions({ voice, prefLanguage }) {
-  const sessionPick = document.getElementById("sessionPick");
   const sessionList = document.getElementById("sessionList");
   const homeSessionList = document.getElementById("homeSessionList");
 
@@ -154,16 +153,9 @@ export function createSessions({ voice, prefLanguage }) {
     document.getElementById("newBtn").addEventListener("click", async () => {
       await refreshPicker();
       goPicker();
-      sessionPick.focus();
     });
     // [Neues Gespräch jetzt starten] - POST /api/sessions
     document.getElementById("confirmNewBtn").addEventListener("click", () => startSession());
-    // Dropdown in the top bar - GET /api/sessions/{id} (empty value = back to picker)
-    sessionPick.addEventListener("change", () => {
-      const id = sessionPick.value;
-      if (id) openSession(id);
-      else goPicker();
-    });
     // Sidebar + picker-screen list entries - GET /api/sessions/{id}
     const onSessionClick = (e) => {
       const btn = e.target.closest(".session-item");

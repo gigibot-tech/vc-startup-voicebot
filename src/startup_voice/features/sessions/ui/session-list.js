@@ -46,9 +46,9 @@ export function upsertSession(list, s) {
 }
 
 /**
- * @param {{ sessionPick: HTMLSelectElement, sessionList: HTMLElement, homeSessionList: HTMLElement }} els
+ * @param {{ sessionList: HTMLElement, homeSessionList: HTMLElement }} els
  */
-export function createSessionListView({ sessionPick, sessionList, homeSessionList }) {
+export function createSessionListView({ sessionList, homeSessionList }) {
   /**
    * @param {{ items: object[], currentId: string|null, loading: boolean, loadingKind: string|null }} state
    */
@@ -56,15 +56,6 @@ export function createSessionListView({ sessionPick, sessionList, homeSessionLis
     // Spinner only for session open / finalize — not while sending a turn.
     const busyKind = (loadingKind === "open" || loadingKind === "finalize") ? loadingKind : null;
     const loadingId = (loading && busyKind) ? currentId : null;
-
-    sessionPick.innerHTML = `<option value="">Gespräch wählen…</option>` + items.map((item) => {
-      const tag = listClosureLabel(item);
-      const busy = item.id === loadingId
-        ? (busyKind === "finalize" ? " · schließt ab…" : " · lädt…")
-        : "";
-      const label = `${fmtTs(item.created_at)} · ${item.id.slice(0, 8)}${tag ? ` · ${tag}` : ""}${busy}`;
-      return `<option value="${esc(item.id)}">${esc(label)}</option>`;
-    }).join("");
 
     const listHtml = items.length ? items.map((item) => {
       const preview = (item.preview && item.preview !== "—")
@@ -80,8 +71,6 @@ export function createSessionListView({ sessionPick, sessionList, homeSessionLis
 
     sessionList.innerHTML = listHtml;
     homeSessionList.innerHTML = listHtml;
-    sessionPick.value = currentId || "";
-    sessionPick.disabled = Boolean(loading && loadingKind === "finalize");
   }
   return { render };
 }

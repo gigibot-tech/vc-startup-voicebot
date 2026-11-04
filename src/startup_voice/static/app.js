@@ -62,7 +62,6 @@ const proposals = createProposals({ voice, sessions });
 const dossierActions = createDossierActions({ voice, sessions, repaintList: () => renderListUi() });
 
 const sessionListView = createSessionListView({
-  sessionPick: $("sessionPick"),
   sessionList: $("sessionList"),
   homeSessionList: $("homeSessionList"),
 });

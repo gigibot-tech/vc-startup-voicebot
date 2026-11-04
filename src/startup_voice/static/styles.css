@@ -56,6 +56,7 @@ button, select, input { font: inherit; color: inherit; }
   grid-template-rows: auto auto 1fr;
   grid-template-columns: 1fr;
 }
+/* Nav "Links": session rail in a left sidebar, dropdown hidden. */
 .app.layout-side {
   grid-template-columns: var(--sidebar-w) 1fr;
   grid-template-rows: auto auto 1fr;
@@ -64,18 +65,9 @@ button, select, input { font: inherit; color: inherit; }
 .app.layout-side .prefs-bar { grid-column: 1 / -1; }
 .app.layout-side .sidebar { display: flex; grid-row: 3; }
 .app.layout-side .main-col { grid-row: 3; }
-/* Top-nav: keep session rail visible so finalize tags (geschlossen/fertig) stay in sync. */
-.app.layout-top {
-  grid-template-columns: minmax(12rem, var(--sidebar-w)) 1fr;
-}
-.app.layout-top .topbar,
-.app.layout-top .prefs-bar { grid-column: 1 / -1; }
-.app.layout-top .sidebar {
-  display: flex;
-  grid-row: 3;
-  border-right: 1px solid var(--htgf-border);
-}
-.app.layout-top .main-col { grid-row: 3; grid-column: 2; }
+.app.layout-side .top-field { display: none; }
+/* Nav "Oben": session dropdown in the top bar, no sidebar. */
+.app.layout-top .main-col { grid-row: 3; }
 
 .topbar {
   display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 0.75rem;
@@ -92,11 +84,6 @@ button, select, input { font: inherit; color: inherit; }
   -webkit-background-clip: text; background-clip: text;
   -webkit-text-fill-color: transparent;
 }
-.top-field select, #sessionPick {
-  min-width: 11rem; max-width: 16rem;
-  border: 1px solid var(--htgf-border); border-radius: 9999px;
-  padding: 0.45rem 0.85rem; background: var(--htgf-base); cursor: pointer;
-}
 
 /* Classic Hero header = glass nav from earlier HTGF layout */
 .app.layout-main-classic .topbar {
@@ -111,9 +98,6 @@ button, select, input { font: inherit; color: inherit; }
 }
 .prefs-bar input[type="range"] {
   width: 5.5rem; accent-color: var(--htgf-berry);
-}
-.app.layout-main-classic #sessionPick {
-  background: var(--htgf-base); font-size: 0.8rem; min-width: 9rem;
 }
 .voice-mini { display: flex; align-items: center; gap: 0.65rem; flex: 1; min-width: 10rem; }
 .voice-mini .name { display: block; font-weight: 600; font-size: 0.88rem; }
@@ -182,6 +166,20 @@ button, select, input { font: inherit; color: inherit; }
 .prefs-prompt, #layoutPanel { width: 100%; }
 .prefs-prompt { margin-top: 0.15rem; }
 #layoutPanel .prefs-group { background: none; padding: 0; }
+/* Binary layout switches: one icon button each, shows the current state, click flips it. */
+.icon-toggle {
+  width: 2.4rem; height: 2.4rem; display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--htgf-border); border-radius: 0.65rem; background: var(--htgf-base);
+  color: inherit; cursor: pointer; padding: 0;
+}
+.icon-toggle:hover { background: color-mix(in srgb, var(--htgf-berry) 10%, var(--htgf-base)); }
+.icon-toggle:focus-visible { outline: 2px solid var(--htgf-berry); outline-offset: 2px; }
+.icon-toggle svg {
+  width: 1.3rem; height: 1.3rem; fill: none; stroke: currentColor;
+  stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round;
+}
+.icon-toggle > span { display: inline-flex; }
+.icon-toggle > span[hidden] { display: none; }
 .prefs-hint { margin: 0 0 0.65rem; font-size: 0.75rem; opacity: 0.65; line-height: 1.4; }
 .prefs-prompt textarea, .catalog-panel textarea {
   width: 100%; resize: vertical; min-height: 2.5rem;
@@ -285,7 +283,6 @@ button, select, input { font: inherit; color: inherit; }
   font-size: clamp(1.2rem, 2.4vw, 1.75rem); line-height: 1.2; margin: 0 0 0.75rem; font-weight: 500;
 }
 .hero h2 em { font-family: var(--font-face); font-style: normal; font-weight: 400; }
-.hero-controls { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.25rem; }
 @media (max-width: 720px) {
   .manager-grid { grid-template-columns: 1fr; }
   .htgf-team-card { max-width: 16rem; }
@@ -324,10 +321,6 @@ button, select, input { font: inherit; color: inherit; }
   width: 0.55rem; height: 0.55rem; border-radius: 50%;
   background: var(--htgf-mint); flex: none;
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--htgf-mint) 45%, transparent);
-}
-.mic-btn--hero {
-  font-size: 1rem; padding: 0.85rem 1.45rem;
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--htgf-contrast) 18%, transparent);
 }
 .mic-btn--bar { padding: 0.55rem 0.95rem; font-size: 0.85rem; }
 .mic-btn.is-live {
@@ -440,7 +433,6 @@ button, select, input { font: inherit; color: inherit; }
 .chat-home h3 { margin: 0 0 0.5rem; }
 .home-list { display: flex; flex-direction: column; gap: 0.35rem; margin: 1rem 0 1.1rem; max-height: 14rem; overflow-y: auto; }
 .app.picking .reply-bar, .app.picking .dossier-panel { opacity: 0.45; pointer-events: none; }
-.app.picking .hero-controls { opacity: 0.45; pointer-events: none; }
 .progress {
   height: 0.5rem; border-radius: 999px; overflow: hidden;
   background: var(--htgf-fond); margin: 1rem 0 1.25rem;

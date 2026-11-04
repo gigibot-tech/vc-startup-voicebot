@@ -135,7 +135,7 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
     voiceStatus.textContent = s;
     if (voiceStatusTop) voiceStatusTop.textContent = s;
   };
-  const micButtons = () => [document.getElementById("micBtn"), document.getElementById("micBtnHero")].filter(Boolean);
+  const micButtons = () => [document.getElementById("micBtn")].filter(Boolean);
   const syncMicLabels = () => {
     let label = "Sprechen";
     let title = "Antwort einsprechen";

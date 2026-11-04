@@ -23,7 +23,7 @@ export function renderMeta({ sttLabel, prefLanguage }) {
   const short = String(session.id).slice(0, 8);
   setText("modeBadge", `${stt} · ${langTag(session.language)} · ${short}`);
   const closure = sessionClosureLabel(session);
-  const hint = `Gespräch ${short}${closure ? ` · ${closure}` : ""} — oben wählen oder „Neues Gespräch“.`;
+  const hint = `Gespräch ${short}${closure ? ` · ${closure}` : ""} — links wählen oder „Neues Gespräch“.`;
   setText("sessionHint", hint);
   setText("sessionHintCompact", hint);
   const metaBit = sessionClosureLabel(session, { short: true });

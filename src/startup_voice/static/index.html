@@ -17,12 +17,6 @@
       <div class="logo">HTGF <span>Voice Intake</span></div>
       <div class="nav-actions">
         <span class="mode-badge" id="modeBadge">Web Speech · de-DE</span>
-        <label class="top-field">
-          <span class="sr-only">Gespräch</span>
-          <!-- [Gespräch wählen] dropdown -> sessions/ui/lifecycle.js openSession(id)
-               -> GET /api/sessions/{id}   (sessions/routes.py get_session). Empty value = back to the picker. -->
-          <select id="sessionPick" aria-label="Gespräch wählen"></select>
-        </label>
         <!-- [Neues Gespräch] -> lifecycle.js bind(): GET /api/sessions + show picker. Creates nothing yet. -->
         <button class="pill" type="button" id="newBtn">
           <span class="classic-only">Neues Gespräch</span>
@@ -87,22 +81,23 @@
       </div>
       <details class="fold" id="layoutPanel">
         <summary>Layout</summary>
-        <div class="prefs-group" aria-label="Layout">
-          <label class="setting setting-row"><span>Theme</span>
-            <select id="themeSel"><option value="light">Hell</option><option value="dark">Dunkel</option><option value="system">System</option></select>
-          </label>
-          <label class="setting setting-row"><span>Main</span>
-            <select id="mainSel">
-              <option value="classic">HTGF Hero</option>
-              <option value="compact">Compact Chat</option>
-            </select>
-          </label>
-          <label class="setting setting-row"><span>Nav</span>
-            <select id="navSel"><option value="top">Oben</option><option value="side">Links</option></select>
-          </label>
-          <label class="setting setting-row"><span>Dossier</span>
-            <select id="dossierSel"><option value="below">Unten</option><option value="side">Rechts</option></select>
-          </label>
+        <div class="prefs-group icon-toggles" aria-label="Layout">
+          <button type="button" class="icon-toggle" data-pref="theme" aria-label="Theme">
+            <span data-v="light" data-title="Hell"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></span>
+            <span data-v="dark" data-title="Dunkel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg></span>
+          </button>
+          <button type="button" class="icon-toggle" data-pref="main" aria-label="Ansicht">
+            <span data-v="classic" data-title="HTGF Hero"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 11h18M7 15h6"/></svg></span>
+            <span data-v="compact" data-title="Compact Chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H9l-5 4z"/></svg></span>
+          </button>
+          <button type="button" class="icon-toggle" data-pref="nav" aria-label="Navigation">
+            <span data-v="top" data-title="Navigation oben"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></svg></span>
+            <span data-v="side" data-title="Navigation links"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></span>
+          </button>
+          <button type="button" class="icon-toggle" data-pref="dossier" aria-label="Dossier">
+            <span data-v="below" data-title="Dossier unten"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 14h18"/></svg></span>
+            <span data-v="side" data-title="Dossier rechts"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></span>
+          </button>
         </div>
       </details>
       <!-- SYSTEM PROMPT (server-side config; handled by interview/ui/config-editor.js)
@@ -148,18 +143,10 @@
             <div class="hero">
               <h1>Dein Startup</h1>
               <h2><em>im HTGF Erstgespräch</em></h2>
-              <p class="lead" id="sessionHint">Gespräch oben wählen oder neu starten.</p>
-              <div class="hero-controls">
-                <!-- [Sprechen] (hero) -> voice.js onMicClick: speech-to-text ONLY. The transcript is handed to
-                     interview/ui/chat.js sendText() via onTranscript (wired in app.js). Mic itself never calls the LLM. -->
-                <button class="mic-btn mic-btn--hero" type="button" id="micBtnHero" aria-pressed="false">
-                  <span class="mic-btn__dot" aria-hidden="true"></span>
-                  <span class="mic-btn__label">Sprechen</span>
-                </button>
-              </div>
+              <p class="lead" id="sessionHint">Gespräch links wählen oder neu starten.</p>
             </div>
           </section>
-          <p class="lead compact-only" id="sessionHintCompact">Gespräch oben wählen oder neu starten.</p>
+          <p class="lead compact-only" id="sessionHintCompact">Gespräch links wählen oder neu starten.</p>
           <section class="chat-home" id="chatHome" hidden>
             <h3>Gespräch wählen</h3>
             <p class="lead">Bestehendes Gespräch öffnen oder ein neues starten — ohne sofortigen Voice-Start.</p>
@@ -182,7 +169,7 @@
           <div class="composer" id="composer">
             <!-- [Enter] -> chat.js submitInput() -> sendText() -->
             <input id="textInput" type="text" aria-label="Antwort schreiben" placeholder="Antwort schreiben…" autocomplete="off" />
-            <!-- [Sprechen] (bar) -> voice.js STT -> onTranscript -> sendText(). Same as the hero mic. -->
+            <!-- [Sprechen] -> voice.js STT -> onTranscript -> sendText(). The only mic button; mic never calls the LLM. -->
             <button class="mic-btn mic-btn--bar" type="button" id="micBtn" aria-pressed="false">
               <span class="mic-btn__dot" aria-hidden="true"></span>
               <span class="mic-btn__label">Sprechen</span>
