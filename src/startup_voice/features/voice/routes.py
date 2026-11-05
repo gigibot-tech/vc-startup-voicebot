@@ -80,10 +80,15 @@ def build_router(*, registry: SessionRegistry) -> APIRouter:
 
     @router.get("/health")
     def health() -> dict:
-        """Liveness + which speech providers are configured (read once at page load)."""
+        """Liveness + which speech providers are configured (read once at page load).
+
+        ``data_dir`` is included so a restart that points at a different session folder
+        is obvious (Gespräche are files on disk — restart does not delete them).
+        """
         return {
             "ok": True,
             "sessions": len(registry.store.list_ids()),
+            "data_dir": str(registry.store.root.resolve()),
             "tts": "elevenlabs" if elevenlabs_configured() else "missing_key",
             "stt": default_provider(),
             "stt_providers": available_providers(),

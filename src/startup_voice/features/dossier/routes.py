@@ -22,7 +22,8 @@ BUTTON -> BACKEND FLOWS  (browser code: features/dossier/ui/render.js + actions.
     -> POST /api/sessions/{id}/dossier/resolve {decisions:[{slot, field, choice, manual_text}]}
     -> resolve_dossier() below -> InterviewPipeline.resolve_proposals(): for each open LLM
        suggestion keep the OLD value, take the NEW one, or take the human's MANUAL text
-       (rejected with 400 if empty). All-or-nothing, re-scores, saves. No LLM call.
+       (rejected with 400 if empty). All-or-nothing, refreshes coverage status, saves.
+       No LLM call (Belege stays until the next extract turn).
     Proposals are created by features/dossier/review.py when an extraction would overwrite a
     filled field.
 
@@ -56,6 +57,7 @@ class DecisionBody(BaseModel):
     field: str
     choice: Choice
     manual_text: str = ""
+    auto: bool = False
 
 
 class ResolveBody(BaseModel):
@@ -86,7 +88,10 @@ def build_router(*, registry: SessionRegistry, pipeline: InterviewPipeline) -> A
     def resolve_dossier(session_id: str, body: ResolveBody) -> dict:
         """[Speichern] on proposal cards - apply old/new/manual choices."""
         session = registry.get(session_id)
-        decisions = [Decision(d.slot, d.field, d.choice, d.manual_text) for d in body.decisions]
+        decisions = [
+            Decision(d.slot, d.field, d.choice, d.manual_text, auto=d.auto)
+            for d in body.decisions
+        ]
         try:
             session = pipeline.resolve_proposals(session, decisions)
         except ValueError as exc:
@@ -125,6 +130,42 @@ def build_router(*, registry: SessionRegistry, pipeline: InterviewPipeline) -> A
             content=pdf_bytes,
             media_type="application/pdf",
             headers={"Content-Disposition": f'attachment; filename="dossier-{session_id}.pdf"'},
+        )
+
+    @router.get("/api/sessions/{session_id}/dossiers/{version_id}.{ext}")
+    def dossier_version_file(session_id: str, version_id: str, ext: str) -> Response:
+        """Download a specific finalized dossier snapshot (md | pdf | json)."""
+        if ext not in ("md", "pdf", "json") or "/" in version_id or ".." in version_id:
+            raise HTTPException(400, "invalid version artifact")
+        base = store.session_dir(session_id) / "dossiers"
+        file_path = base / f"{version_id}_dossier.{ext}"
+        if not file_path.is_file():
+            # Lazy-build PDF if only JSON snapshot exists
+            json_path = base / f"{version_id}_dossier.json"
+            if ext == "pdf" and json_path.is_file():
+                from startup_voice.domain import InterviewSession
+                snap = InterviewSession.model_validate_json(json_path.read_text(encoding="utf-8"))
+                pdf_bytes = render_dossier_pdf(snap)
+                file_path.write_bytes(pdf_bytes)
+            else:
+                raise HTTPException(404, "dossier version not found")
+        fname = f"dossier-{session_id}-{version_id}.{ext}"
+        if ext == "md":
+            return PlainTextResponse(
+                file_path.read_text(encoding="utf-8"),
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+            )
+        if ext == "json":
+            return Response(
+                content=file_path.read_bytes(),
+                media_type="application/json; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+            )
+        return Response(
+            content=file_path.read_bytes(),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
         )
 
     @router.post("/api/evaluate-file")

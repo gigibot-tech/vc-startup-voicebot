@@ -10,11 +10,11 @@ BUTTON -> BACKEND FLOWS  (browser code: features/interview/ui/chat.js + config-e
       browser   sendText() -> POST /api/sessions/{id}/turn/stream   {"text": "..."}
       here      turn_stream()          SSE framing + error events
       pipeline  InterviewPipeline.stream_turn()
-                  1. LLM call #1 EXTRACT  complete()  -> dossier slots filled, re-scored
-                  2. LLM call #2 REPLY    stream()    -> chunks
-                  3. save turn to disk (only after the last chunk)
-      browser   <- event: delta {text} ... then event: done {session, reply}
-                   bubble grows per delta; on done the dossier repaints and voice.speak(reply) runs.
+                  1. LLM REPLY stream() → chunks + [[dossier:yes|no]] gate
+                  2. event: reply → UI TTS + mic unlock
+                  3. optional EXTRACT complete() only if dossier:yes → dossier bubble
+                  4. event: done {session, reply, needs_extract}
+      browser   bubble grows per delta; speak on `reply`; dossier patch on `done`.
 
     POST /turn (same logic, no streaming, one JSON answer) is kept for API clients and tests.
 
@@ -28,7 +28,7 @@ BUTTON -> BACKEND FLOWS  (browser code: features/interview/ui/chat.js + config-e
 [Prompt speichern] / [Defaults]   (#savePromptBtn / #resetPromptBtn, Einstellungen > System-Prompt)
 [Katalog speichern] / [Defaults]  (#saveCatalogBtn / #resetCatalogBtn, Fragenkatalog)
     interview/ui/config-editor.js
-      save  -> PUT  /api/interview-config   {greeting, reply_system_prompt, slot_questions}
+      save  -> PUT  /api/interview-config   {greeting, reply_system_prompt, slot_questions, followup_mode}
                put_interview_config() -> InterviewConfigStore.save() (normalizes empties to defaults)
       reset -> POST /api/interview-config/reset -> deletes the saved file, returns the defaults.
       Both return the config the UI then repaints. No LLM call. Takes effect on the NEXT turn.
@@ -91,7 +91,16 @@ def build_router(
             raise HTTPException(502, f"LLM turn failed: {exc}") from exc
         registry.put(session)
         reply = session.messages[-1].content if session.messages else ""
-        return {"session": session.model_dump(), "reply": reply}
+        ev = session.evaluation
+        offer_end = bool(
+            ev
+            and (
+                ev.ready_for_closing
+                or not ev.missing_fields
+                or float(ev.field_coverage or 0) >= 1.0
+            )
+        )
+        return {"session": session.model_dump(), "reply": reply, "offer_end": offer_end}
 
     @router.post("/api/sessions/{session_id}/turn/stream")
     def turn_stream(session_id: str, body: TurnBody) -> StreamingResponse:
@@ -102,38 +111,94 @@ def build_router(
 
         Response is ``text/event-stream``. Each event is two lines + blank line::
 
+            event: status
+            data: {"phase": "reply", "message": "Thinking…"}  <- always first
             event: delta
-            data: {"text": "Danke. "}            <- repeated, one per LLM chunk
-
+            data: {"text": "Danke. "}                    <- repeated, one per LLM chunk
+            event: reply
+            data: {"reply": "…", "session": {...}, "needs_extract": true,
+                   "offer_end": true|false}
+                <- spoken text ready: UI starts TTS + unlocks mic
+            event: status
+            data: {"phase": "extract", "message": "Updating dossier…"}  <- always after reply
             event: done
-            data: {"session": {...}, "reply": "Danke. Wie gross ist der Markt?"}
+            data: {"session": {...}, "reply": "…", "needs_extract": true,
+                   "offer_end": true|false}
 
-            event: error                         <- instead of ``done`` on failure
+            event: error                                 <- instead of ``done`` on failure
             data: {"message": "LLM turn failed: ..."}
 
         Contract: exactly one terminal event (``done`` or ``error``) per request.
-        The turn is written to disk only on success. On ``error`` the cached
-        in-memory session already contains the user message (it is mutated
-        before the LLM replies), and the client keeps whatever partial text it
-        painted.
+        Assistant reply is saved before ``reply``; dossier extract always after that.
+        On ``error`` the in-memory session may already contain the user message.
 
         Why a sync ``def`` generator: Starlette runs it in a threadpool, so the
         blocking httpx calls to the LLM do not stall the event loop.
+
+        UI order is fixed: Thinking… → reply → Updating dossier…
         """
+        from startup_voice.features.interview.pipeline import EXTRACT_PHASE, ReplyDone
+
         session = registry.get(session_id)
 
         def events() -> Iterator[str]:
+            needs_extract = True
+            offer_end = False
+            reply = ""
+            yield _sse(
+                "status",
+                {"phase": "reply", "message": "Thinking…"},
+            )
             try:
-                # stream_turn() runs LLM call #1 (extract) to completion first, so
-                # the first `delta` only appears after that; then call #2 streams.
-                for chunk in pipeline.stream_turn(session, body.text):
-                    yield _sse("delta", {"text": chunk})
+                for item in pipeline.stream_turn(session, body.text):
+                    if isinstance(item, ReplyDone):
+                        needs_extract = True  # dossier always follows the spoken reply
+                        offer_end = bool(item.offer_end)
+                        reply = item.reply
+                        registry.put(session)
+                        yield _sse(
+                            "reply",
+                            {
+                                "reply": item.reply,
+                                "session": session.model_dump(),
+                                "needs_extract": True,
+                                "offer_end": offer_end,
+                            },
+                        )
+                        continue
+                    if item is EXTRACT_PHASE:
+                        yield _sse(
+                            "status",
+                            {
+                                "phase": "extract",
+                                "message": "Updating dossier…",
+                            },
+                        )
+                        continue
+                    yield _sse("delta", {"text": item})
             except Exception as exc:
                 yield _sse("error", {"message": f"LLM turn failed: {exc}"})
                 return
             registry.put(session)
-            reply = session.messages[-1].content if session.messages else ""
-            yield _sse("done", {"session": session.model_dump(), "reply": reply})
+            if not reply:
+                reply = session.messages[-1].content if session.messages else ""
+            # Re-check after extract: dossier update may have flipped ready_for_closing / coverage=1.0
+            ev = session.evaluation
+            if ev and (
+                ev.ready_for_closing
+                or not ev.missing_fields
+                or float(ev.field_coverage or 0) >= 1.0
+            ):
+                offer_end = True
+            yield _sse(
+                "done",
+                {
+                    "session": session.model_dump(),
+                    "reply": reply,
+                    "needs_extract": needs_extract,
+                    "offer_end": offer_end,
+                },
+            )
 
         return StreamingResponse(
             events(),
@@ -169,6 +234,16 @@ def build_router(
         session = pipeline.finalize_session(registry.get(session_id))
         registry.put(session)
         return {"session": session.model_dump(), "reply": session.spoken_summary}
+
+    @router.post("/api/sessions/{session_id}/continue")
+    def continue_asking(session_id: str) -> dict:
+        """[Weiter fragen] on the end banner - agent asks one more follow-up question."""
+        try:
+            session, question = pipeline.continue_interview(registry.get(session_id))
+        except Exception as exc:
+            raise HTTPException(502, f"Continue question failed: {exc}") from exc
+        registry.put(session)
+        return {"session": session.model_dump(), "reply": question}
 
     # ------------------------------------------------------------------
     # Interview config: the editable prompt, greeting and question catalog.

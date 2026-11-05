@@ -18,29 +18,36 @@ export async function api(path, opts) {
  * Wire format (produced by features/interview/routes.py `turn_stream`). Events are separated by a
  * blank line; each has an `event:` name and a JSON `data:` payload:
  *
+ *     event: status                -> onEvent("status", { phase, message })
+ *     data: {"phase": "extract"|"reply", "message": "..."}
+ *
  *     event: delta                 -> onEvent("delta", { text })   (many)
  *     data: {"text": "Danke. "}
  *
- *     event: done                  -> onEvent("done", { session, reply })  (once)
+ *     event: reply                 -> onEvent("reply", { reply, session, needs_extract })
+ *     data: {…}   spoken text ready — UI may TTS + unlock mic before extract
+ *
+ *     event: done                  -> onEvent("done", { session, reply, needs_extract })  (once)
  *     data: {"session": {...}, "reply": "..."}
  *
  *     event: error                 -> THROWS Error(message)         (instead of done)
  *     data: {"message": "..."}
  *
- * Used by: app.js `sendText()`. This helper is transport only: it knows nothing
- * about chat bubbles, voice, or the LLM, which sits behind the endpoint.
+ * Used by: interview/ui/chat.js `sendText()`. Transport only — no chat/LLM logic.
  *
  * @param {string} path                       e.g. `/api/sessions/${id}/turn/stream`
  * @param {object} body                       JSON-serialisable request body
  * @param {(name: string, data: any) => void} onEvent  called per parsed event
+ * @param {{signal?: AbortSignal}} [opts]
  * @returns {Promise<any>} the payload of the `done` event
- * @throws {Error} on HTTP error, an `error` event, or a stream that ends without `done`
+ * @throws {Error} on HTTP error, an `error` event, abort, or a stream that ends without `done`
  */
-export async function apiStream(path, body, onEvent) {
+export async function apiStream(path, body, onEvent, opts = {}) {
   const res = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: opts.signal,
   });
   if (!res.ok) throw new Error(await res.text());
   const reader = res.body.getReader();
@@ -60,15 +67,20 @@ export async function apiStream(path, body, onEvent) {
     if (name === "done") done = data;
     onEvent(name, data);
   };
-  for (;;) {
-    const { value, done: eof } = await reader.read();
-    buf += decoder.decode(value || new Uint8Array(), { stream: !eof });
-    let idx;
-    while ((idx = buf.indexOf("\n\n")) >= 0) {
-      dispatch(buf.slice(0, idx));
-      buf = buf.slice(idx + 2);
+  try {
+    for (;;) {
+      const { value, done: eof } = await reader.read();
+      buf += decoder.decode(value || new Uint8Array(), { stream: !eof });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        dispatch(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+      }
+      if (eof) break;
     }
-    if (eof) break;
+  } catch (err) {
+    try { await reader.cancel(); } catch { /* ignore */ }
+    throw err;
   }
   if (buf.trim()) dispatch(buf);
   if (!done) throw new Error("stream ended without result");

@@ -173,6 +173,7 @@ def test_evaluate_session_marks_solid_when_complete():
         state.summary = "belastbar mit 10 Kunden und 5k MRR"
         state.evidence = ["10 Kunden", "5k MRR"]
         state.missing_or_vague = []
+        state.belege = 0.8
     result = evaluate_session(session)
     assert result.ready_for_closing is True
     assert result.status == "solid"
@@ -340,12 +341,55 @@ class StreamingStubLLM(StubExtractLLM):
 
 
 def test_stream_turn_yields_chunks_and_persists(tmp_path: Path):
+    from startup_voice.features.interview.pipeline import EXTRACT_PHASE, ReplyDone
+
     pipe = InterviewPipeline(StreamingStubLLM(), FileSessionStore(tmp_path))
     session, _ = pipe.start_session()
-    chunks = list(pipe.stream_turn(session, "Wir sind zwei Gründer."))
+    items = list(pipe.stream_turn(session, "Wir sind zwei Gründer."))
+    assert any(isinstance(i, ReplyDone) for i in items)
+    assert EXTRACT_PHASE in items  # stub has no [[dossier:no]] → default extract
+    chunks = [c for c in items if isinstance(c, str)]
     assert chunks == ["Danke. ", "Wie groß ", "ist der Markt?"]
     assert session.messages[-1].content == "Danke. Wie groß ist der Markt?"
     assert session.turn_index == 1
+
+
+def test_stream_turn_always_extracts_after_reply(tmp_path: Path):
+    """Dossier always follows the spoken reply — even if the model wrote [[dossier:no]]."""
+    from startup_voice.features.interview.pipeline import EXTRACT_PHASE, ReplyDone
+
+    class NoDossierStream(StubExtractLLM):
+        def stream(self, system: str, user: str, *, max_tokens: int | None = None):
+            yield from ["Alles klar. ", "Weiter.\n[[dossier:no]]"]
+
+    pipe = InterviewPipeline(NoDossierStream(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    items = list(pipe.stream_turn(session, "ok"))
+    done = next(i for i in items if isinstance(i, ReplyDone))
+    assert done.needs_extract is True
+    assert done.reply == "Alles klar. Weiter."
+    assert EXTRACT_PHASE in items
+    # Order: reply chunks → ReplyDone → EXTRACT_PHASE
+    done_i = next(i for i, x in enumerate(items) if isinstance(x, ReplyDone))
+    extract_i = items.index(EXTRACT_PHASE)
+    assert done_i < extract_i
+
+
+def test_extract_can_run_every_turn(tmp_path: Path):
+    from startup_voice.features.interview.pipeline import EXTRACT_PHASE, ReplyDone
+
+    class AlwaysYes(StubExtractLLM):
+        def stream(self, system: str, user: str, *, max_tokens: int | None = None):
+            yield "Danke.\n[[dossier:yes]]"
+
+    pipe = InterviewPipeline(AlwaysYes(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    first = list(pipe.stream_turn(session, "Wir sind zwei Gründer."))
+    assert EXTRACT_PHASE in first
+    assert next(i for i in first if isinstance(i, ReplyDone)).needs_extract is True
+    second = list(pipe.stream_turn(session, "Noch mehr Fakten."))
+    assert EXTRACT_PHASE in second
+    assert next(i for i in second if isinstance(i, ReplyDone)).needs_extract is True
 
 
 def test_api_turn_stream_sse(tmp_path: Path, monkeypatch):
@@ -356,6 +400,12 @@ def test_api_turn_stream_sse(tmp_path: Path, monkeypatch):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
     assert r.text.count("event: delta") == 3
+    assert "event: reply" in r.text
+    assert "Thinking…" in r.text
+    assert '"phase": "extract"' in r.text or '"phase":"extract"' in r.text
+    assert "Updating dossier" in r.text
+    # Thinking… before extract
+    assert r.text.index("Thinking…") < r.text.index("Updating dossier")
     assert "event: done" in r.text
     saved = client.get(f"/api/sessions/{sid}").json()
     assert saved["messages"][-1]["content"] == "Danke. Wie groß ist der Markt?"

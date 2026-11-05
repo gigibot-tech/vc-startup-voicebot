@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import json
 import shutil
 from pathlib import Path
 
 from startup_voice.domain import (
     DimensionState,
+    DossierVersion,
     InterviewSession,
     StepEvaluation,
     StepSnapshot,
 )
-from startup_voice.features.dossier import render_dossier_markdown
+from startup_voice.features.dossier import render_dossier_markdown, render_dossier_pdf
 from startup_voice.features.dossier.scoring import evaluate_session
 
 
@@ -45,10 +47,43 @@ class FileSessionStore:
         path.mkdir(parents=True, exist_ok=True)
         (path / "objects").mkdir(exist_ok=True)
         (path / "steps").mkdir(exist_ok=True)
+        (path / "dossiers").mkdir(exist_ok=True)
         return path
 
+    def save_dossier_version(self, session: InterviewSession) -> DossierVersion:
+        """Write an immutable timestamped dossier snapshot under dossiers/vXX_<ts>_dossier.*."""
+        base = self.session_dir(session.id)
+        dossiers_dir = base / "dossiers"
+        next_v = len(session.dossier_versions) + 1
+        now = datetime.now(UTC)
+        stamp = now.strftime("%Y%m%dT%H%M%SZ")
+        vid = f"v{next_v:02d}_{stamp}"
+        entry = DossierVersion(
+            version=next_v,
+            id=vid,
+            created_at=now.isoformat(),
+            turn_index=session.turn_index,
+            field_coverage=float(session.evaluation.field_coverage or 0.0),
+            evidence_specificity=float(session.evaluation.evidence_specificity or 0.0),
+            ready_for_closing=bool(session.evaluation.ready_for_closing),
+            spoken_summary=session.spoken_summary or "",
+        )
+        session.dossier_versions.append(entry)
+        md = render_dossier_markdown(session)
+        (dossiers_dir / f"{vid}_dossier.md").write_text(md, encoding="utf-8")
+        (dossiers_dir / f"{vid}_dossier.json").write_text(
+            session.model_dump_json(indent=2), encoding="utf-8"
+        )
+        try:
+            pdf_bytes = render_dossier_pdf(session)
+            (dossiers_dir / f"{vid}_dossier.pdf").write_bytes(pdf_bytes)
+        except Exception:
+            pass  # font/PDF optional on headless CI; md + json always written
+        return entry
+
     def save(self, session: InterviewSession, *, step: StepSnapshot | None = None) -> Path:
-        session.evaluation = evaluate_session(session)
+        # Caller refreshes evaluation after dossier mutations (scoring.refresh_evaluation).
+        # Do not re-score here — that double-ran evaluate_session on every turn.
         base = self.session_dir(session.id)
         (base / "session.json").write_text(
             session.model_dump_json(indent=2), encoding="utf-8"
@@ -92,8 +127,7 @@ class FileSessionStore:
             except Exception:
                 continue
             preview = next((m.content[:72] for m in reversed(s.messages) if m.role == "user"), "")
-            # Re-score so "fertig" is never based on a stale evaluation blob.
-            ev = evaluate_session(s)
+            ev = s.evaluation
             complete = bool(s.finalized and ev.ready_for_closing)
             items.append({
                 "id": s.id,

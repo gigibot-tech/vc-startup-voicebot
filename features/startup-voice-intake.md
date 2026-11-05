@@ -36,27 +36,29 @@ module documents which button triggers which backend flow.
 | Planned | LiveKit agent process | Needs GPU PersonaPlex server + room join |
 
 ### Voice UX
-- Phases: **listening → thinking → speaking → idle** (orb + status). Sending a turn clears listening/speaking immediately so UI does not stick on “Spricht…/Hört zu…”.
+- Phases: **listening → thinking → speaking → idle** (orb + status). Sending a turn clears listening/speaking immediately so UI does not stick on “Speaking…/Listening…”.
+- Listening dock: ChatGPT-style **waveform + Stop** (`#listenBar`); **live transcript** is a provisional user chat bubble (`paintSttPreview` → `.team-qa--live`), not the composer.
 - Deepgram: click mic to record; auto-stop on short silence, or click again to send. Fallback: Web Speech when no API key.
+- **UI chrome is English**; interview speech language stays DE/EN via `#langSel`.
 
 UI session picker loads `GET /api/sessions` and resumes `session.json` from disk.
 
 ### Default layout
-- **Main = HTGF Hero** (team card + „Dein Startup / Erstgespräch“ — earlier look); the single **Sprechen** button sits next to the text box
+- **Main = HTGF Hero** (team card + „Dein Startup / Erstgespräch“ — earlier look); **Sprechen** only once a session is open (above conflicts)
 - Optional Main = Compact Chat
 - **Nav oben** + **Dossier unter dem Chat** (rounded card in Hero mode)
 - Optional: Nav links / Dossier rechts
 - **Gespräch löschen** → `DELETE /api/sessions/{id}` (chat + files)
 - **Dossier leeren** → clear slots only
-- **Dossier abschließen** → end of dossier panel; warns if incomplete / already finalized; then returns to chat picker
-- **Neues Gespräch** → picker first (no auto-TTS); confirm to start quietly
+- **Dossier abschließen** → end of dossier panel; warns if incomplete; writes an immutable timestamped snapshot `dossiers/vXX_<UTC>_dossier.{md,json,pdf}` + appends to `session.dossier_versions` (each session can hold multiple finalized versions; stays in the session with per-version MD/PDF/JSON links)
+- **Home/picker** → only **Neues Gespräch jetzt starten** (no Sprechen on home); mic appears after the session opens
 - **App state SSOT** → `appState.{view,sessionId,session,list}` + URL `?s=<id>`; sidebar/select/dossier/finalize all use `sessionId` (stale responses ignored)
 - **Voice I/O** → `SttRouter` (Strategy + fallback chain), same composition style as `InterviewPipeline(llm=…)` — **not** inside the interview pipeline. `POST /api/voice/preflight` fail-fast DNS/key before mic; Sprechen stops TTS first; cloud STT → browser fallback
 
 ### Einstellungen (UI)
 | Gruppe | Was |
 |--------|-----|
-| **Sprache** | STT-Provider + Antwortsprache (`de-DE` / `en-US`) |
+| **Sprache** | DE/EN in der **Kopfzeile** (`#langSel`) — aktives Gespräch + Prefs für neue; STT-Provider bleibt in Einstellungen |
 | **Tonalität** | Stimme an/aus, Tempo, Stabilität, Ähnlichkeit, Ausdruck (ElevenLabs) |
 | **System-Prompt** | Begrüßung + Reply-System-Prompt → `PUT /api/interview-config` |
 | **Fragenkatalog** | Blueprint-Fragen pro Dimension im Dossier-Panel (rechts/unten) |
@@ -77,14 +79,24 @@ Persistenz: `data/sessions/interview_config.json` (Server-SSOT für Prompt + Kat
 | Dossier leeren | Wipe slot fields, keep chat |
 | Gespräch löschen | Delete whole session from disk |
 
+## Conflicts & auto-resolve
+
+- Extract attaches per-field **`confidence` (0–1)** on proposals (fallback: slot belege, else 0.5).
+- Prefs **Auto-resolve if confidence ≥** (default **0.75**; Off = 1.01): client POSTs `choice=new` for matching open proposals after render; history in `session.conflict_history` (expandable “Resolved conflicts”).
+- Reply prompt always appends **REPLY_NO_REASK** + `already_answered`; **ASK_NOW** comes from post-extract coverage (no keyword topic matching). Pace ≈5 substantive turns; 1–2 short questions OK on empty gaps.
+
+## Honest extract + agent end
+
+- Extract fills a field **only** when the founder clearly answered that field; otherwise `""` / null (OK). No blanket “noch nicht” across unrelated slots. Merge drops literal `null`/`none`/etc.
+- When intake is ready (or further questions would only rehash), reply may end with **`[[intake:end]]`** (stripped before TTS). SSE `offer_end` shows `#intakeEnd`: **Continue** (keep chatting) or **Finalize dossier** (existing finalize — user decides; never auto-finalize).
+
 ## Collect vs score
 
-1. **fill_objects** — **LLM JSON extract**; every value goes through the review gate (`dossier/review.py`):
-   empty field → written, differing from a filled field → proposal card (old / new / manual), nothing overwritten
-2. **evaluate** — deterministic coverage/specificity on the accepted values (no LLM)
-3. **decide_reply** — ask next gap (**streamed** via `POST /api/sessions/{id}/turn/stream`) → `steps/turn_XX.json` + `dossier.md`
+1. **decide_reply** — **Thinking…** first; ask **ASK_NOW** from prior coverage; never re-ask `already_answered`; may offer `[[intake:end]]`.
+2. **fill_objects** — **Updating dossier…** always after the spoken reply (+ `belege` / field `confidence`). Review gate (`dossier/review.py`). SSE: Thinking… → deltas → `reply` → extract status → `done`. Busy UI = topbar `#processBanner`; interrupt needs confirm.
+3. **evaluate** — coverage + LLM Belege after extract; persist `steps/turn_XX.json` + `dossier.md`
 
-Run with Ollama (`granite4.2:8b` default). Extract + reply + summary are **LLM-only** (no heuristic fallback). Deterministic file scoring remains for coverage.
+Run with Ollama (`granite4.2:8b` default). Extract + Belege + reply + summary are **LLM-only**.
 
 ## SSOT slots (`domain.DIMENSIONS_SPEC`)
 

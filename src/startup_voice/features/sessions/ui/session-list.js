@@ -1,21 +1,25 @@
-/** Session list: pure label/list helpers + the view that paints sidebar, home list and dropdown. */
+/** Session list: pure label/list helpers + the view that paints sidebar, home list and top select. */
 import { esc, fmtTs } from "../../shared/format.js";
+import { chromeLang, t } from "../prefs/chrome-i18n.js";
+import { prefs } from "../prefs/prefs.js";
 
 /** Closure label for an open session object. `short` is used in compact meta lines. */
-export function sessionClosureLabel(s, { short } = {}) {
+export function sessionClosureLabel(s, { short, lang } = {}) {
   if (!s) return "";
+  const de = chromeLang(lang || prefs.lang) === "de";
   const ready = Boolean(s.evaluation && s.evaluation.ready_for_closing);
-  if (s.finalized && ready) return short ? "fertig" : "fertig (vollständig)";
-  if (s.finalized) return short ? "geschlossen" : "geschlossen (noch Lücken)";
-  if (ready) return short ? "bereit" : "bereit zum Abschluss";
+  if (s.finalized && ready) return short ? (de ? "fertig" : "done") : (de ? "fertig (vollständig)" : "done (complete)");
+  if (s.finalized) return short ? (de ? "geschlossen" : "closed") : (de ? "geschlossen (noch Lücken)" : "closed (still gaps)");
+  if (ready) return short ? (de ? "bereit" : "ready") : (de ? "bereit zum Abschluss" : "ready to finalize");
   return "";
 }
 
 /** Closure label for a list entry (GET /api/sessions item). */
-export function listClosureLabel(item) {
-  if (item.complete) return "fertig";
-  if (item.finalized) return "geschlossen";
-  if (item.ready_for_closing) return "bereit";
+export function listClosureLabel(item, lang) {
+  const de = chromeLang(lang || prefs.lang) === "de";
+  if (item.complete) return de ? "fertig" : "done";
+  if (item.finalized) return de ? "geschlossen" : "closed";
+  if (item.ready_for_closing) return de ? "bereit" : "ready";
   return "";
 }
 
@@ -46,31 +50,54 @@ export function upsertSession(list, s) {
 }
 
 /**
- * @param {{ sessionList: HTMLElement, homeSessionList: HTMLElement }} els
+ * @param {{ sessionList: HTMLElement, homeSessionList: HTMLElement, sessionPick?: HTMLSelectElement|null }} els
  */
-export function createSessionListView({ sessionList, homeSessionList }) {
+export function createSessionListView({ sessionList, homeSessionList, sessionPick }) {
   /**
-   * @param {{ items: object[], currentId: string|null, loading: boolean, loadingKind: string|null }} state
+   * @param {{ items: object[], currentId: string|null, loading: boolean, loadingKind: string|null, processBusy?: object|null }} state
    */
-  function render({ items, currentId, loading, loadingKind }) {
-    // Spinner only for session open / finalize — not while sending a turn.
-    const busyKind = (loadingKind === "open" || loadingKind === "finalize") ? loadingKind : null;
-    const loadingId = (loading && busyKind) ? currentId : null;
+  function render({ items, currentId, loading, loadingKind, processBusy }) {
+    // Spinner for open / finalize / turn / extract (header owns the copy; list shows a short tag).
+    const processId = processBusy?.sessionId || null;
+    const processKind = processBusy?.kind || null;
+    const busyKind = processKind
+      || ((loading && (loadingKind === "open" || loadingKind === "finalize")) ? loadingKind : null);
+    const loadingId = processId || ((loading && busyKind) ? currentId : null);
+    const lang = chromeLang(prefs.lang);
+    const de = lang === "de";
 
     const listHtml = items.length ? items.map((item) => {
       const preview = (item.preview && item.preview !== "—")
         ? item.preview.slice(0, 48)
         : item.id.slice(0, 8);
-      const tag = listClosureLabel(item);
+      const tag = listClosureLabel(item, lang);
       const isBusy = item.id === loadingId;
-      const busyLabel = busyKind === "finalize" ? "schließt ab…" : "lädt…";
+      const busyLabel = busyKind === "finalize"
+        ? (de ? "schließt ab…" : "finalizing…")
+        : busyKind === "extract"
+          ? (de ? "Dossier…" : "dossier…")
+          : busyKind === "turn"
+            ? (de ? "antwortet…" : "replying…")
+            : (de ? "lädt…" : "loading…");
       return `<button type="button" class="session-item${item.id === currentId ? " active" : ""}${isBusy ? " is-loading" : ""}" data-id="${esc(item.id)}" ${isBusy ? "aria-busy=\"true\"" : ""}>
         <span class="t">${esc(fmtTs(item.created_at))}${tag ? ` · ${tag}` : ""}${isBusy ? ` · ${busyLabel}` : ""}</span>
         <span class="s">${esc(preview)}</span></button>`;
-    }).join("") : `<div class="session-empty">Noch keine Gespräche</div>`;
+    }).join("") : `<div class="session-empty">${esc(t("noSessions", lang))}</div>`;
 
     sessionList.innerHTML = listHtml;
     homeSessionList.innerHTML = listHtml;
+
+    // Topbar <select> is only used while the sidebar is collapsed (see settings.js).
+    if (sessionPick) {
+      const opts = items.length
+        ? items.map((item) => {
+          const label = `${fmtTs(item.created_at)} · ${(item.preview && item.preview !== "—") ? item.preview.slice(0, 28) : item.id.slice(0, 8)}`;
+          return `<option value="${esc(item.id)}"${item.id === currentId ? " selected" : ""}>${esc(label)}</option>`;
+        }).join("")
+        : `<option value="">${esc(t("noSessions", lang))}</option>`;
+      sessionPick.innerHTML = `<option value="">${esc(t("sessionPick", lang))}</option>${opts}`;
+      if (currentId) sessionPick.value = currentId;
+    }
   }
   return { render };
 }

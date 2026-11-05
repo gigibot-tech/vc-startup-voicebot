@@ -26,6 +26,11 @@ BUTTON -> BACKEND FLOWS  (browser code: features/sessions/ui/session-list.js + s
 [JSON export link]  (#downloadJson)
     Plain <a href="/api/sessions/{id}">: same endpoint as "open", the browser downloads it.
 
+[DE/EN in header]  (#langSel)
+    app.js onLanguageChange -> PATCH /api/sessions/{id} {language}
+      updates session.language (STT/TTS + reply language override). Prefs also store the choice
+      for the next POST /api/sessions.
+
 Also served here (no button; for debugging / API clients): GET /objects/{slot}, GET /steps.
 """
 
@@ -39,6 +44,8 @@ from pydantic import BaseModel
 from startup_voice.domain import SLOT_ORDER
 from startup_voice.features.sessions.registry import SessionRegistry
 from startup_voice.features.sessions.store import evaluate_artifact_file
+from startup_voice.features.interview.config import DEFAULT_FOLLOWUP_MODE, FOLLOWUP_MODES
+from startup_voice.language import normalize_language
 
 if TYPE_CHECKING:  # type-only: sessions must not import the interview feature at runtime
     from startup_voice.features.interview.pipeline import InterviewPipeline
@@ -46,6 +53,11 @@ if TYPE_CHECKING:  # type-only: sessions must not import the interview feature a
 
 class StartBody(BaseModel):
     language: str = "de"
+
+
+class PatchSessionBody(BaseModel):
+    language: str | None = None
+    followup_mode: str | None = None
 
 
 def build_router(*, registry: SessionRegistry, pipeline: InterviewPipeline) -> APIRouter:
@@ -68,6 +80,19 @@ def build_router(*, registry: SessionRegistry, pipeline: InterviewPipeline) -> A
     def get_session(session_id: str) -> dict:
         """[open conversation] and [JSON export] - the full session document."""
         return registry.get(session_id).model_dump()
+
+    @router.patch("/{session_id}")
+    def patch_session(session_id: str, body: PatchSessionBody) -> dict:
+        """Update per-session settings: language and/or followup_mode (Nachhaken)."""
+        session = registry.get(session_id)
+        if body.language is not None:
+            session.language = normalize_language(body.language)
+        if body.followup_mode is not None:
+            mode = body.followup_mode.strip().lower()
+            session.followup_mode = mode if mode in FOLLOWUP_MODES else DEFAULT_FOLLOWUP_MODE
+        store.save(session)
+        registry.put(session)
+        return session.model_dump()
 
     @router.delete("/{session_id}")
     def delete_session(session_id: str) -> dict:

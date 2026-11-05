@@ -10,6 +10,16 @@ export function fmtTs(iso) {
   } catch { return iso || "—"; }
 }
 
+/** Short HH:MM(:SS) timestamp for chat bubbles. */
+export function fmtTime(iso) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch { return ""; }
+}
+
 export const fmt01 = (n) => Number(n).toFixed(2).replace(".", ",");
 
 export const clampSpeed = (v) => {
@@ -24,5 +34,5 @@ export const clamp01 = (v, fallback = 0) => {
   return Math.min(1, Math.max(0, n));
 };
 
-/** Session language code ("de"/"en") -> BCP-47 tag for the browser Web Speech API. */
+/** Session language code ("de"/"en") -> BCP-47 tag for the browser Web Speech API / #langSel. */
 export const langTag = (code) => ({ de: "de-DE", en: "en-US" }[code] || "de-DE");

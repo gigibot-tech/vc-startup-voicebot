@@ -1,8 +1,16 @@
-"""Deterministic scoring of slots and sessions (pure logic, no I/O, no LLM)."""
+"""Slot/session status from field coverage + LLM Belege scores (no keyword heuristics).
+
+Coverage = share of required fields filled (deterministic).
+Specificity / „Belege %“ = ``DimensionState.belege`` written by the interview LLM
+(extract or refresh) — how concrete and readable the evidence is for an HTGF analyst.
+
+Call ``refresh_evaluation(session)`` once after dossier mutations (extract / resolve /
+tool / clear). Persistence just writes ``session.evaluation`` — it does not re-score.
+"""
 
 from __future__ import annotations
 
-import re
+from typing import Any
 
 from startup_voice.domain import (
     DIMENSIONS_SPEC,
@@ -14,11 +22,38 @@ from startup_voice.domain import (
     StepEvaluation,
 )
 
-_SPECIFIC = re.compile(
-    r"\d|%|€|\$|mrr|arr|mvp|pilot|loi|seed|pre-?seed|kund|user|umsat|"
-    r"kein|keine|keiner|nein|none|null|n/?a|verneint|zero",
-    re.I,
-)
+
+def clamp_belege(value: float | int | str | None) -> float:
+    try:
+        n = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    if n != n:  # NaN
+        return 0.0
+    return max(0.0, min(1.0, n))
+
+
+def slot_has_content(state: DimensionState) -> bool:
+    return bool(
+        any((v or "").strip() for v in state.fields.values())
+        or (state.summary or "").strip()
+        or state.evidence
+    )
+
+
+def apply_belege_map(session: InterviewSession, belege: Any) -> None:
+    """Write LLM belege 0..1 onto matching slots (never downgrade a filled slot to 0)."""
+    if not isinstance(belege, dict):
+        return
+    for slot in SLOT_ORDER:
+        if slot not in belege:
+            continue
+        state = session.objects[slot]
+        val = clamp_belege(belege[slot])
+        # Extract often emits 0 for slots not mentioned this turn — keep prior belege if slot has content.
+        if val <= 0 and slot_has_content(state) and float(state.belege or 0) > 0:
+            continue
+        state.belege = val
 
 
 def evaluate_dimension(state: DimensionState) -> tuple[float, float, SlotStatus, list[str]]:
@@ -26,13 +61,14 @@ def evaluate_dimension(state: DimensionState) -> tuple[float, float, SlotStatus,
     missing = [f for f in spec.required_fields if not (state.fields.get(f) or "").strip()]
     filled = len(spec.required_fields) - len(missing)
     coverage = filled / max(1, len(spec.required_fields))
-    blob = " ".join([state.summary, *state.evidence, *state.fields.values()])
-    hits = len(_SPECIFIC.findall(blob))
-    specificity = min(1.0, hits / 3.0) if blob.strip() else 0.0
-    # Explicit zeros/denials are enough to close a well-covered slot.
+    has_content = slot_has_content(state)
+    raw_spec = clamp_belege(state.belege) if has_content else 0.0
+    # Full field coverage with no missing_or_vague guarantees a baseline specificity so a missed
+    # belege score never blocks ready_for_closing when all 3 fields are concretely filled.
+    specificity = max(raw_spec, 0.5) if (coverage >= 1.0 and not missing) else raw_spec
     if coverage >= 0.67 and specificity >= 0.34 and not state.missing_or_vague:
         status: SlotStatus = "solid"
-    elif coverage > 0 or state.evidence or state.summary:
+    elif has_content:
         status = "partial"
     else:
         status = "open"
@@ -45,15 +81,12 @@ def pick_next_focus(
     statuses: dict[str, SlotStatus],
 ) -> SlotId | None:
     """Breadth-first: empty slots first, then incomplete fields, then quality deepen."""
-    # 1) Never touched — get something written into every dimension.
     for slot in SLOT_ORDER:
         if coverages.get(slot, 0) <= 0 and statuses.get(slot) != "solid":
             return slot
-    # 2) Fields still missing inside a slot.
     for slot in SLOT_ORDER:
         if coverages.get(slot, 0) < 1.0:
             return slot
-    # 3) All fields set somewhere — deepen weak / non-solid slots.
     for slot in SLOT_ORDER:
         if statuses.get(slot) != "solid":
             return slot
@@ -90,3 +123,9 @@ def evaluate_session(session: InterviewSession) -> StepEvaluation:
         slot_coverage=coverages,
         slot_specificity=specificities,
     )
+
+
+def refresh_evaluation(session: InterviewSession) -> StepEvaluation:
+    """Single write path for ``session.evaluation`` after dossier mutations."""
+    session.evaluation = evaluate_session(session)
+    return session.evaluation

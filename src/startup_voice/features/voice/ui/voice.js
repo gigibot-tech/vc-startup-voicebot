@@ -76,13 +76,17 @@
  *   Orchestrator features/interview/pipeline.py   → InterviewPipeline.stream_turn()
  *   LLM client   features/interview/llm.py        → ConfigurableLLM.stream()
  *
- * KNOWN LIMIT
- * -----------
- * speak() is called only AFTER the whole reply has streamed in, and /api/tts
- * returns one complete mp3. The text streams; the voice does not.
+ * LIVE PATHS (kept deliberately simple for fluency)
+ * ------------------------------------------------
+ * STT: interim + partial finals paint into a live user chat bubble in #qaList
+ *      (not the composer). Cloud STT runs a silent Web Speech “shadow” for that
+ *      preview while MediaRecorder + /api/stt produce the final transcript.
+ * TTS: beginSpeakStream / pushSpeakStream / endSpeakStream speak sentence-sized
+ *      chunks via the same POST /api/tts as soon as a .?!… lands in the reply
+ *      stream (queue + one clip at a time — no true audio byte stream).
  */
 import { api } from "../../shared/api.js";
-import { clampSpeed, langTag } from "../../shared/format.js";
+import { clampSpeed, fmtTime, langTag } from "../../shared/format.js";
 
 const PREFLIGHT_TTL_MS = 20000;
 
@@ -95,7 +99,7 @@ const PREFLIGHT_TTL_MS = 20000;
  *
  * @param {object} deps
  * @param {object} deps.prefs               shared preferences object (read live)
- * @param {HTMLInputElement} deps.textInput  shows interim browser-STT text
+ * @param {HTMLTextAreaElement|HTMLInputElement} [deps.textInput]  typed composer only (not STT)
  * @param {() => boolean} deps.canListen     false while no chat session is active
  * @param {() => string} deps.getLanguage    language code ("de"/"en") STT and TTS must use now
  *
@@ -111,8 +115,11 @@ const PREFLIGHT_TTL_MS = 20000;
  *
  * @param {() => void} deps.onProviderChange STT provider label changed
  * @param {() => void} deps.onAbort          user cancelled a pending turn
+ * @param {() => boolean} [deps.confirmInterrupt]  warn before killing in-flight turn/extract
  */
-export function createVoice({ prefs, textInput, canListen, getLanguage, onTranscript, onProviderChange, onAbort }) {
+export function createVoice({
+  prefs, textInput, canListen, getLanguage, onTranscript, onProviderChange, onAbort, confirmInterrupt,
+}) {
   const voiceStatus = document.getElementById("voiceStatus");
   const voiceStatusTop = document.getElementById("voiceStatusTop");
   const voiceOrb = document.getElementById("voiceOrb");
@@ -130,29 +137,53 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
   let silenceTimer = null;
   let speechSeen = false;
   let preflightCache = { at: 0, stt: null, use: null, ok: false };
+  /** Cloud-record only: Web Speech paints interim text; final transcript still from /api/stt. */
+  let interimShadow = null;
+  /** Live STT bubble in #qaList (provisional user message while mic is open). */
+  let liveWrap = null;
+  let liveTranscript = "";
+  /** Sentence-chunk TTS while the reply SSE streams. */
+  let speakGen = 0;
+  let speakQueue = [];
+  let speakPumping = false;
+  let speakStreamOn = false;
+  let speakForce = false;
+  let speakBuf = "";
+  let speakJoined = "";
+  let waveRaf = 0;
+  let waveAnalyser = null;
+  let waveCtx = null;
+  let meterStream = null; // browser-STT path: mic only for waveform
 
   const setStatus = (s) => {
     voiceStatus.textContent = s;
     if (voiceStatusTop) voiceStatusTop.textContent = s;
   };
   const micButtons = () => [document.getElementById("micBtn")].filter(Boolean);
+  const syncListenBar = (listening) => {
+    const dock = document.getElementById("speakDock");
+    const bar = document.getElementById("listenBar");
+    dock?.classList.toggle("is-listening", Boolean(listening));
+    if (bar) bar.hidden = !listening;
+  };
   const syncMicLabels = () => {
-    let label = "Sprechen";
-    let title = "Antwort einsprechen";
+    const de = String(getLanguage?.() || "de").toLowerCase().startsWith("de");
+    let label = de ? "Sprechen" : "Speak";
+    let title = de ? "Antwort diktieren" : "Dictate a reply";
     let live = false;
     let thinking = false;
     let speaking = false;
     if (voicePhase === "listening") {
-      label = "Stoppen";
-      title = "Aufnahme beenden und senden";
+      label = de ? "Stopp" : "Stop";
+      title = de ? "Aufnahme beenden und senden" : "Stop recording and send";
       live = true;
     } else if (voicePhase === "speaking") {
-      label = "Stopp Stimme";
-      title = "Agent-Stimme stoppen";
+      label = de ? "Stimme stoppen" : "Stop voice";
+      title = de ? "Agentenstimme stoppen" : "Stop agent voice";
       speaking = true;
     } else if (voicePhase === "thinking") {
-      label = "Abbrechen";
-      title = "Verarbeitung abbrechen";
+      label = de ? "Abbrechen" : "Cancel";
+      title = de ? "Verarbeitung abbrechen" : "Cancel processing";
       thinking = true;
     }
     micButtons().forEach((btn) => {
@@ -166,6 +197,7 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
       btn.setAttribute("aria-pressed", live || speaking || thinking ? "true" : "false");
       btn.title = title;
     });
+    syncListenBar(live);
   };
   const setVoicePhase = (phase, statusText) => {
     voicePhase = phase;
@@ -180,11 +212,69 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
     });
     syncMicLabels();
     if (statusText != null) setStatus(statusText);
-    else if (phase === "idle") setStatus("Bereit");
-    else if (phase === "listening") setStatus("Hört zu…");
-    else if (phase === "thinking") setStatus("Denkt…");
-    else if (phase === "speaking") setStatus("Spricht…");
+    else if (phase === "idle") setStatus("Ready");
+    else if (phase === "listening") setStatus("Listening…");
+    else if (phase === "thinking") setStatus("Thinking…");
+    else if (phase === "speaking") setStatus("Speaking…");
   };
+
+  function stopWaveform() {
+    if (waveRaf) cancelAnimationFrame(waveRaf);
+    waveRaf = 0;
+    waveAnalyser = null;
+    if (waveCtx) {
+      try { waveCtx.close(); } catch { /* ignore */ }
+      waveCtx = null;
+    }
+    if (meterStream) {
+      meterStream.getTracks().forEach((t) => t.stop());
+      meterStream = null;
+    }
+    const canvas = document.getElementById("listenWave");
+    if (canvas) {
+      const c = canvas.getContext("2d");
+      if (c) c.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  }
+
+  function startWaveform(stream) {
+    stopWaveform();
+    const canvas = document.getElementById("listenWave");
+    if (!canvas || !stream) return;
+    try {
+      waveCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = waveCtx.createMediaStreamSource(stream);
+      waveAnalyser = waveCtx.createAnalyser();
+      waveAnalyser.fftSize = 256;
+      source.connect(waveAnalyser);
+      const data = new Uint8Array(waveAnalyser.frequencyBinCount);
+      const draw = () => {
+        waveRaf = requestAnimationFrame(draw);
+        if (!waveAnalyser) return;
+        waveAnalyser.getByteFrequencyData(data);
+        const c = canvas.getContext("2d");
+        if (!c) return;
+        const w = canvas.width;
+        const h = canvas.height;
+        c.clearRect(0, 0, w, h);
+        const bars = 28;
+        const gap = 2;
+        const bw = (w - gap * (bars - 1)) / bars;
+        for (let i = 0; i < bars; i++) {
+          const idx = Math.floor((i / bars) * data.length);
+          const mag = data[idx] / 255;
+          const bh = Math.max(3, mag * h * 0.92);
+          const x = i * (bw + gap);
+          const y = (h - bh) / 2;
+          c.fillStyle = `rgba(180, 40, 90, ${0.35 + mag * 0.55})`;
+          c.fillRect(x, y, bw, bh);
+        }
+      };
+      draw();
+    } catch {
+      /* waveform optional */
+    }
+  }
   const sttLabel = () => ({
     elevenlabs: "ElevenLabs STT",
     deepgram: "Deepgram",
@@ -219,9 +309,113 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
     if (silenceTimer) { clearInterval(silenceTimer); silenceTimer = null; }
   }
 
+  function clearLiveBubble() {
+    liveTranscript = "";
+    if (liveWrap?.isConnected) liveWrap.remove();
+    liveWrap = null;
+    qaListCleanupOrphans();
+  }
+
+  function qaListCleanupOrphans() {
+    document.querySelectorAll(".team-qa--live").forEach((el) => {
+      if (el !== liveWrap) el.remove();
+    });
+  }
+
+  /** Provisional user bubble while listening — grows with interim + finals. */
+  function ensureLiveBubble() {
+    const qaList = document.getElementById("qaList");
+    const chatScroll = document.getElementById("chatScroll");
+    if (!qaList) return null;
+    qaListCleanupOrphans();
+    if (liveWrap?.isConnected) return liveWrap;
+    liveWrap = document.createElement("div");
+    liveWrap.className = "team-qa team-qa--live";
+    liveWrap.setAttribute("aria-live", "polite");
+    liveWrap.setAttribute("aria-busy", "true");
+    const stamp = fmtTime(new Date().toISOString());
+    liveWrap.innerHTML = `<div class="team-qa__a">
+      <div class="team-qa__a-avatar user">Du</div>
+      <div class="team-qa__a-bubble user-bubble user-bubble--live">
+        <p></p>
+        ${stamp ? `<time class="team-qa__time">${stamp}</time>` : ""}
+      </div>
+    </div>`;
+    qaList.appendChild(liveWrap);
+    if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
+    return liveWrap;
+  }
+
+  /** Show full STT text as a live chat bubble (composer stays for typing only). */
+  function paintSttPreview(text) {
+    const next = String(text || "").replace(/\s+/g, " ").trim();
+    liveTranscript = next;
+    if (!next) {
+      // Keep an empty waiting bubble while mic is still open.
+      if (voicePhase === "listening") {
+        const wrap = ensureLiveBubble();
+        const p = wrap?.querySelector("p");
+        if (p) p.textContent = "";
+        return;
+      }
+      clearLiveBubble();
+      return;
+    }
+    const wrap = ensureLiveBubble();
+    const p = wrap?.querySelector("p");
+    if (p) p.textContent = next;
+    const chatScroll = document.getElementById("chatScroll");
+    if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
+  }
+
+  function takeLiveTranscript() {
+    const t = liveTranscript.trim();
+    clearLiveBubble();
+    return t;
+  }
+
+  function stopInterimShadow() {
+    if (!interimShadow) return;
+    const rec = interimShadow;
+    interimShadow = null;
+    try { rec.onend = null; rec.onerror = null; rec.onresult = null; rec.stop(); } catch { /* ignore */ }
+  }
+
+  function startInterimShadow() {
+    stopInterimShadow();
+    const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Ctor) return;
+    const recognition = new Ctor();
+    interimShadow = recognition;
+    recognition.lang = langTag(getLanguage());
+    recognition.interimResults = true;
+    recognition.continuous = true;
+    let finalText = "";
+    recognition.onresult = (ev) => {
+      if (interimShadow !== recognition) return;
+      let interim = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const t = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) finalText += `${t} `;
+        else interim += t;
+      }
+      // Live UI only — finals + current interim (whole transcript, not either/or).
+      paintSttPreview(`${finalText}${interim}`);
+    };
+    recognition.onerror = () => {
+      if (interimShadow === recognition) interimShadow = null;
+    };
+    recognition.onend = () => {
+      if (interimShadow === recognition) interimShadow = null;
+    };
+    try { recognition.start(); } catch { interimShadow = null; }
+  }
+
   function stopMicCapture({ keepPhase } = {}) {
     clearSilenceWatch();
     speechSeen = false;
+    stopInterimShadow();
+    stopWaveform();
     if (activeRecognition) {
       const rec = activeRecognition;
       activeRecognition = null;
@@ -240,6 +434,12 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
   }
 
   function stopSpeak() {
+    speakGen += 1;
+    speakStreamOn = false;
+    speakBuf = "";
+    speakJoined = "";
+    speakQueue = [];
+    speakPumping = false;
     if (!audioEl) return;
     const el = audioEl;
     audioEl = null;
@@ -250,55 +450,159 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
     try { el.load(); } catch { /* ignore */ }
   }
 
+  function clearAwaitingGreeting() {
+    document.getElementById("app")?.classList.remove("awaiting-greeting");
+  }
+
   function afterSpeak() {
+    clearAwaitingGreeting();
     if (voicePhase === "speaking") setVoicePhase("idle");
     if (prefs.auto && canListen()) startListening();
   }
 
-  /**
-   * TEXT → VOICE. Plays `text` aloud via POST /api/tts (ElevenLabs → one mp3).
-   * Called by the HOST (chat.js sendText) AFTER the LLM reply has fully arrived.
-   * It does not generate the text; it only reads out what it is given.
-   */
-  async function speak(text) {
-    stopSpeak();
-    if (!prefs.voice || !text) {
-      setVoicePhase("idle");
+  async function playTtsClip(text, gen) {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        language: getLanguage(),
+        stability: prefs.stability,
+        similarity: prefs.similarity,
+        speed: clampSpeed(prefs.speed),
+      }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    if (gen !== speakGen) return;
+    const url = URL.createObjectURL(await res.blob());
+    if (gen !== speakGen) {
+      URL.revokeObjectURL(url);
       return;
     }
-    setVoicePhase("speaking");
-    try {
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text,
-          language: getLanguage(),
-          stability: prefs.stability,
-          similarity: prefs.similarity,
-          speed: clampSpeed(prefs.speed),
-        }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const url = URL.createObjectURL(await res.blob());
-      audioEl = new Audio(url);
-      audioEl.playbackRate = 1;
-      audioEl.onended = () => {
+    await new Promise((resolve, reject) => {
+      const el = new Audio(url);
+      audioEl = el;
+      el.onended = () => {
         URL.revokeObjectURL(url);
-        if (audioEl) audioEl = null;
-        afterSpeak();
+        if (audioEl === el) audioEl = null;
+        resolve();
       };
-      audioEl.onerror = () => {
+      el.onerror = () => {
         URL.revokeObjectURL(url);
-        audioEl = null;
-        setVoicePhase("idle", "TTS fehlgeschlagen");
+        if (audioEl === el) audioEl = null;
+        reject(new Error("TTS playback failed"));
       };
-      await audioEl.play();
-    } catch (err) {
-      let msg = String(err.message || err);
-      try { msg = JSON.parse(msg).detail || msg; } catch { /* plain */ }
-      setVoicePhase("idle", `TTS fehlgeschlagen — ${String(msg).slice(0, 120)}`);
+      el.play().catch(reject);
+    });
+  }
+
+  async function pumpSpeakQueue() {
+    if (speakPumping) return;
+    speakPumping = true;
+    const gen = speakGen;
+    while (speakQueue.length && gen === speakGen) {
+      const piece = speakQueue.shift();
+      try {
+        setVoicePhase("speaking");
+        await playTtsClip(piece, gen);
+      } catch (err) {
+        if (gen !== speakGen) break;
+        let msg = String(err.message || err);
+        try { msg = JSON.parse(msg).detail || msg; } catch { /* plain */ }
+        setVoicePhase("idle", `TTS failed — ${String(msg).slice(0, 120)}`);
+        speakQueue = [];
+        speakStreamOn = false;
+        speakPumping = false;
+        clearAwaitingGreeting();
+        return;
+      }
     }
+    speakPumping = false;
+    if (gen === speakGen && !speakStreamOn && !speakQueue.length) afterSpeak();
+  }
+
+  function enqueueSpeak(text) {
+    const t = (text || "").trim();
+    if (!t) return;
+    speakJoined = speakJoined ? `${speakJoined} ${t}` : t;
+    speakQueue.push(t);
+    void pumpSpeakQueue();
+  }
+
+  /** Start sentence-chunk TTS for an in-flight reply stream (chat.js deltas). */
+  function beginSpeakStream({ force = false } = {}) {
+    stopSpeak();
+    speakForce = force;
+    speakStreamOn = true;
+    speakBuf = "";
+    speakJoined = "";
+  }
+
+  /** Feed one reply delta; speaks completed sentences as soon as they land. */
+  function pushSpeakStream(chunk) {
+    if (!speakStreamOn || (!prefs.voice && !speakForce) || !chunk) return;
+    speakBuf += chunk;
+    for (;;) {
+      // Never speak a trailing / partial [[dossier:…]] gate.
+      let visible = speakBuf.replace(/\s*\[\[\s*dossier\s*:\s*(yes|no)\s*\]\]\s*$/i, "");
+      const hold = visible.search(/\[\[\s*dossier/i);
+      if (hold >= 0) visible = visible.slice(0, hold);
+      const m = visible.match(/^([\s\S]*?[.!?…]+)(\s+|$)/);
+      if (!m) break;
+      const sentence = m[1].trim();
+      const eaten = m[0].length;
+      speakBuf = speakBuf.slice(eaten);
+      if (sentence) enqueueSpeak(sentence);
+    }
+  }
+
+  /** Finish stream: speak any remainder (authoritative clean `finalText` from event: reply). */
+  function endSpeakStream(finalText) {
+    speakStreamOn = false;
+    if ((!prefs.voice && !speakForce)) {
+      if (!speakPumping && !speakQueue.length) {
+        setVoicePhase("idle");
+        afterSpeak();
+      }
+      return;
+    }
+    const clean = String(finalText || "").trim();
+    const norm = (s) => s.replace(/\s+/g, " ").trim();
+    // Drop any unfinished buffer — finalText is authoritative.
+    speakBuf = "";
+    if (!clean) {
+      if (!speakPumping && !speakQueue.length) afterSpeak();
+      return;
+    }
+    const a = norm(speakJoined);
+    const b = norm(clean);
+    if (!a) {
+      enqueueSpeak(clean);
+    } else if (b.startsWith(a) && b.length > a.length) {
+      enqueueSpeak(b.slice(a.length).trim());
+    } else if (a !== b && !a.startsWith(b)) {
+      // Stream text drifted from final reply — restart with the clean answer (avoid silence).
+      const force = speakForce;
+      stopSpeak();
+      speakForce = force;
+      enqueueSpeak(clean);
+    }
+    if (!speakPumping && !speakQueue.length) afterSpeak();
+  }
+
+  /**
+   * TEXT → VOICE (one shot). Prefer begin/push/endSpeakStream while reply SSE is live.
+   * @param {string} text @param {{force?: boolean}} [opts] force: speak even if „Antworten vorlesen“ is off
+   */
+  async function speak(text, { force = false } = {}) {
+    beginSpeakStream({ force });
+    speakStreamOn = false;
+    if ((!prefs.voice && !force) || !text) {
+      setVoicePhase("idle");
+      afterSpeak();
+      return;
+    }
+    enqueueSpeak(text);
   }
 
   async function voicePreflight(preferredStt) {
@@ -356,6 +660,7 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
   function watchSilence(stream) {
     clearSilenceWatch();
     speechSeen = false;
+    startWaveform(stream);
     let audioCtx;
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -420,10 +725,12 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
       mediaRecorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) mediaChunks.push(ev.data); };
       mediaRecorder.onerror = () => {
         stopMicCapture({ keepPhase: true });
-        setVoicePhase("idle", "Mikrofonfehler");
+        setVoicePhase("idle", "Microphone error");
       };
       mediaRecorder.onstop = async () => {
         clearSilenceWatch();
+        stopInterimShadow();
+        stopWaveform();
         const blob = new Blob(mediaChunks, { type: mediaRecorder?.mimeType || "audio/webm" });
         if (mediaStream) {
           mediaStream.getTracks().forEach((t) => t.stop());
@@ -432,35 +739,40 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
         mediaRecorder = null;
         mediaChunks = [];
         if (!blob.size) {
-          setVoicePhase("idle", "Nichts gehört");
+          clearLiveBubble();
+          setVoicePhase("idle", "Nothing heard");
           return;
         }
-        setVoicePhase("thinking", `Transkribiert (${sttLabel()})…`);
+        setVoicePhase("thinking", `Transcribing (${sttLabel()})…`);
         try {
           const text = await transcribeCloud(blob);
+          clearLiveBubble();
           if (text) {
-            textInput.value = "";
             // ── HAND-OFF (cloud STT path) ─────────────────────────────────────
             // voice.js ends here. The host decides what a transcript means;
             // in this app that is sendText() → POST .../turn/stream → LLM.
             await onTranscript(text);
           } else {
-            setVoicePhase("idle", "Nichts erkannt — bitte nochmal");
+            setVoicePhase("idle", "Nothing recognized — try again");
           }
         } catch (err) {
+          clearLiveBubble();
           // Cloud STT failed after record — fall back to browser for next attempt.
           preflightCache = { at: 0, stt: null, use: null, ok: false };
           sttProvider = "browser";
           onProviderChange();
-          setVoicePhase("idle", `Cloud-STT down → Web Speech. Nochmal Sprechen.`);
+          setVoicePhase("idle", "Cloud STT down → Web Speech. Tap Speak again.");
         }
       };
       mediaRecorder.start(250);
       watchSilence(mediaStream);
-      setStatus("Hört zu… (Stoppen = senden)");
+      // Live chat bubble while cloud records (shadow Web Speech; final = /api/stt).
+      paintSttPreview("");
+      startInterimShadow();
+      setStatus("Listening… (live bubble · Stop = send)");
     } catch (err) {
       stopMicCapture({ keepPhase: true });
-      setVoicePhase("idle", `Mikrofon: ${String(err.message || err).slice(0, 100)}`);
+      setVoicePhase("idle", `Microphone: ${String(err.message || err).slice(0, 100)}`);
     }
   }
 
@@ -470,52 +782,75 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
       return;
     }
     const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Ctor) { setVoicePhase("idle", "Mikrofon nicht verfügbar — bitte tippen"); return; }
+    if (!Ctor) { setVoicePhase("idle", "Microphone unavailable — please type"); return; }
     stopSpeak();
     stopMicCapture({ keepPhase: true });
     const recognition = new Ctor();
     activeRecognition = recognition;
     recognition.lang = langTag(getLanguage());
     recognition.interimResults = true;
-    recognition.continuous = false;
+    // Continuous until Stop (or silence auto-stop via onend after pause chains).
+    recognition.continuous = true;
     let finalText = "";
-    recognition.onstart = () => setVoicePhase("listening");
+    recognition.onstart = () => {
+      setVoicePhase("listening");
+      paintSttPreview("");
+    };
     recognition.onresult = (ev) => {
       let interim = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const t = ev.results[i][0].transcript;
         if (ev.results[i].isFinal) finalText += `${t} `; else interim += t;
       }
-      textInput.value = (finalText || interim).trim();
+      // Whole transcript: committed finals + live interim (was || and clipped the rest).
+      paintSttPreview(`${finalText}${interim}`);
     };
     recognition.onerror = () => {
       if (activeRecognition === recognition) activeRecognition = null;
+      stopWaveform();
+      clearLiveBubble();
       if (voicePhase === "listening") setVoicePhase("idle");
     };
     recognition.onend = async () => {
       if (activeRecognition === recognition) activeRecognition = null;
-      if (voicePhase !== "listening") return;
-      const t = textInput.value.trim();
-      textInput.value = "";
+      stopWaveform();
+      if (voicePhase !== "listening") {
+        clearLiveBubble();
+        return;
+      }
+      const t = takeLiveTranscript();
       // ── HAND-OFF (browser Web Speech path) ──────────────────────────────
       // Same contract as the cloud path above: pass the string out, stop here.
       if (t) await onTranscript(t);
       else setVoicePhase("idle");
     };
-    try { recognition.start(); }
-    catch {
+    try {
+      recognition.start();
+      // Waveform meter (Web Speech has no audio stream of its own).
+      navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      }).then((stream) => {
+        if (activeRecognition !== recognition) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        meterStream = stream;
+        startWaveform(stream);
+      }).catch(() => { /* meter optional */ });
+    } catch {
       activeRecognition = null;
-      setVoicePhase("idle", "Mikrofon beschäftigt");
+      clearLiveBubble();
+      setVoicePhase("idle", "Microphone busy");
     }
   }
 
   async function startListening() {
-    if (!canListen()) { setStatus("Zuerst Gespräch wählen"); return; }
+    if (!canListen()) { setStatus("Choose a session first"); return; }
     // Sprechen: kill TTS first — never start mic while agent still talks.
     stopSpeak();
     stopMicCapture({ keepPhase: true });
     sttProvider = resolveSttProvider();
-    setVoicePhase("thinking", "Prüfe STT…");
+    setVoicePhase("thinking", "Checking STT…");
     try {
       const pf = await voicePreflight(sttProvider);
       const use = pf.use || "browser";
@@ -527,7 +862,7 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
         if (sttProvider !== "browser") {
           sttProvider = "browser";
           onProviderChange();
-          setStatus("Cloud-STT unreachable → Web Speech");
+          setStatus("Cloud STT unreachable → Web Speech");
         }
         startBrowserListening();
         return;
@@ -542,7 +877,7 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
       // Fail closed to browser ASAP.
       sttProvider = "browser";
       onProviderChange();
-      setVoicePhase("idle", `STT-Check fail → Web Speech (${String(err.message || err).slice(0, 80)})`);
+      setVoicePhase("idle", `STT check failed → Web Speech (${String(err.message || err).slice(0, 80)})`);
       startBrowserListening();
     }
   }
@@ -550,13 +885,19 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
   const stopVoice = () => {
     stopSpeak();
     stopMicCapture({ keepPhase: true });
+    clearLiveBubble();
     onAbort();
     setVoicePhase("idle");
   };
 
   const onMicClick = () => {
-    // Always cut TTS on mic interaction — Sprechen must not wait on speak().
-    if (voicePhase === "speaking") stopSpeak();
+    // Always cut TTS on mic interaction — Speak must not wait on speak().
+    if (voicePhase === "speaking") {
+      stopSpeak();
+      clearAwaitingGreeting();
+      setVoicePhase("idle");
+      return;
+    }
     if (voicePhase === "listening") {
       if (sttProvider === "elevenlabs" || sttProvider === "deepgram") stopCloudRecording();
       else if (activeRecognition) { try { activeRecognition.stop(); } catch { /* ignore */ } }
@@ -564,11 +905,23 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
       return;
     }
     if (voicePhase === "thinking") {
+      if (confirmInterrupt && !confirmInterrupt()) return;
       stopVoice();
       return;
     }
+    // New mic while extract/turn still runs in header — warn then abort.
+    if (confirmInterrupt && !confirmInterrupt()) return;
+    onAbort?.();
     startListening();
   };
+
+  // Delegation: placeSpeakDock may recreate #listenStopBtn.
+  document.addEventListener("click", (e) => {
+    const stop = e.target?.closest?.("#listenStopBtn");
+    if (!stop) return;
+    e.preventDefault();
+    if (voicePhase === "listening") onMicClick();
+  });
 
   return {
     getPhase: () => voicePhase,
@@ -582,6 +935,9 @@ export function createVoice({ prefs, textInput, canListen, getLanguage, onTransc
     stopMicCapture,
     stopSpeak,
     speak,
+    beginSpeakStream,
+    pushSpeakStream,
+    endSpeakStream,
     onMicClick,
   };
 }

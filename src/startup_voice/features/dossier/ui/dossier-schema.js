@@ -30,15 +30,32 @@ export async function loadDossierSchema() {
   } catch (_) { /* keep defaults */ }
 }
 
-/** Badge: field-fill % ≠ quality status (status comes from deterministic eval, not LLM). */
+/**
+ * Badge text. "Belege %" = LLM evidence quality (DimensionState.belege via scoring.py):
+ * how concrete / analyst-readable the slot text is — not keyword hits.
+ * 0% = filled but vague; high = names, Zahlen, klare Verneinungen.
+ */
 export function slotBadgeLabel(st, fieldPct, specPct) {
   const pct = Math.round(fieldPct * 100);
-  if (st === "solid") return `Belastbar · ${pct}% Felder`;
-  if (st === "open") return `Offen · ${pct}%`;
-  // partial: fields may be full while evidence is still vague (no numbers/concrete markers)
+  if (st === "solid") return `Solid · ${pct}%`;
+  if (st === "open") return `Open · ${pct}%`;
+  // partial: fields may be full while evidence is still vague
   if (pct >= 100) {
-    const q = Number.isFinite(specPct) ? ` · Schärfe ${Math.round(specPct * 100)}%` : "";
-    return `Felder voll · Aspekte unscharf${q}`;
+    return Number.isFinite(specPct)
+      ? `Full · evidence ${Math.round(specPct * 100)}%`
+      : "Full · still vague";
   }
-  return `Lückenhaft · ${pct}% Felder`;
+  return `Incomplete · ${pct}%`;
+}
+
+/** Tooltip for the badge — explains Belege / status. */
+export function slotBadgeTitle(st, fieldPct, specPct) {
+  const pct = Math.round(fieldPct * 100);
+  if (st === "solid") return "Solid: fields filled and evidence rated concrete/readable";
+  if (st === "open") return "No usable answers in this slot yet";
+  if (pct >= 100) {
+    const s = Number.isFinite(specPct) ? Math.round(specPct * 100) : 0;
+    return `All fields set, but evidence only ${s}% (LLM) — too vague for “Solid”.`;
+  }
+  return `Status ${schema.statusLabels[st] || st}`;
 }

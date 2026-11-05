@@ -93,6 +93,12 @@ STATUS_LABELS_DE: dict[str, str] = {
     "partial": "In Arbeit",
     "solid": "Belastbar",
 }
+STATUS_LABELS_EN: dict[str, str] = {
+    "open": "Open",
+    "partial": "In progress",
+    "solid": "Solid",
+}
+STATUS_LABELS = STATUS_LABELS_DE
 
 
 def field_label(slot: SlotId, key: str) -> str:
@@ -117,7 +123,7 @@ def dossier_schema_public() -> dict:
             }
             for slot in SLOT_ORDER
         ],
-        "status_labels": STATUS_LABELS_DE,
+        "status_labels": STATUS_LABELS,
     }
 
 
@@ -126,6 +132,7 @@ class FieldProposal(BaseModel):
 
     It waits here until a human picks old / new / manual (see features/dossier/review.py).
     Scoring only ever reads ``DimensionState.fields`` (the accepted value), never this.
+    ``confidence`` (0–1) drives client auto-resolve when above the user threshold.
     """
 
     old: str  # accepted value when the first proposal for this field arrived
@@ -134,6 +141,21 @@ class FieldProposal(BaseModel):
     quote: str = ""  # evidence for the suggestion (mandatory for pdf sources)
     page: int | None = None
     turn: int = 0
+    confidence: float = 0.5  # extract LLM (or belege fallback); used for auto-resolve
+
+
+class ConflictResolution(BaseModel):
+    """One resolved merge conflict (auto or manual) for the expandable history UI."""
+
+    slot: str
+    field: str
+    choice: Literal["old", "new", "manual"]
+    old: str = ""
+    new: str = ""
+    confidence: float = 0.0
+    source: str = "chat"
+    at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    auto: bool = False
 
 
 class DimensionState(BaseModel):
@@ -146,6 +168,8 @@ class DimensionState(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     missing_or_vague: list[str] = Field(default_factory=list)
     status: SlotStatus = "open"
+    # LLM-judged Belege quality 0..1 (concreteness / readability for HTGF). Not keyword hits.
+    belege: float = 0.0
     updated_at_turn: int = 0
 
     @classmethod
@@ -154,7 +178,7 @@ class DimensionState(BaseModel):
 
 
 class StepEvaluation(BaseModel):
-    """Deterministic score for a step or object file (no LLM required)."""
+    """Session score: coverage is field-fill ratio; specificity/Belege comes from LLM ``belege``."""
 
     field_coverage: float = 0.0
     evidence_specificity: float = 0.0
@@ -170,6 +194,7 @@ class TurnMessage(BaseModel):
     role: Literal["user", "assistant", "system"]
     content: str
     ts: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    warning: str = ""  # embedded inline warning in AI bubble when token/context limit hit
 
 
 class StepSnapshot(BaseModel):
@@ -183,22 +208,46 @@ class StepSnapshot(BaseModel):
     agent_reply: str
 
 
+class DossierVersion(BaseModel):
+    """Immutable finalized dossier snapshot on disk (one session can have v1, v2, …)."""
+
+    version: int
+    id: str  # e.g. "v01_20261105T144800Z"
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    turn_index: int = 0
+    field_coverage: float = 0.0
+    evidence_specificity: float = 0.0
+    ready_for_closing: bool = False
+    spoken_summary: str = ""
+
+
 class InterviewSession(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex[:12])
     created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     language: str = "de"
+    # Per-session Nachhaken mode (balanced|insist|strict). Default = Ausgewogen.
+    followup_mode: str = "balanced"
     objects: dict[SlotId, DimensionState] = Field(default_factory=dict)
     messages: list[TurnMessage] = Field(default_factory=list)
     turn_index: int = 0
     finalized: bool = False
     spoken_summary: str = ""
     evaluation: StepEvaluation = Field(default_factory=StepEvaluation)
+    conflict_history: list[ConflictResolution] = Field(default_factory=list)
+    dossier_versions: list[DossierVersion] = Field(default_factory=list)
 
     @classmethod
-    def create(cls, *, language: str = "de") -> InterviewSession:
+    def create(cls, *, language: str = "de", followup_mode: str = "balanced") -> InterviewSession:
         objects = {slot: DimensionState.blank(slot) for slot in SLOT_ORDER}
-        return cls(language=language, objects=objects)
+        return cls(language=language, followup_mode=followup_mode, objects=objects)
 
 
 class LLM(Protocol):
-    def complete(self, system: str, user: str, *, max_tokens: int | None = None) -> str: ...
+    def complete(
+        self,
+        system: str,
+        user: str,
+        *,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> str: ...

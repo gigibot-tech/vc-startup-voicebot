@@ -9,12 +9,14 @@ red/green diff and need your OK.
 
 ```bash
 cp .env.example .env     # add ELEVENLABS_API_KEY for spoken replies (optional)
-./run.sh                 # checks Ollama + model, syncs deps, starts the app
+./run.sh                 # checks Ollama + model, syncs deps, starts with auto-reload
+./run.sh --no-watch      # same, but no uvicorn --reload
 # open http://127.0.0.1:8140/
 ```
 
-`run.sh` stops with a clear message if Ollama is not running, the model is missing, or the port is
-taken. Without the script: `uv sync && uv run startup-voice`.
+`run.sh` enables **uvicorn auto-reload** by default (watches `src/startup_voice`). It stops with a
+clear message if Ollama is not running, the model is missing, or the port is taken. Without the
+script: `uv sync && UVICORN_RELOAD=1 uv run startup-voice`.
 
 ## Requirements
 
@@ -43,23 +45,46 @@ The app pings the LLM on startup and refuses to start if it does not answer.
 | `UI_HOST` / `UI_PORT` | `127.0.0.1` / `8140` | where the app listens |
 | `DATA_DIR` | `./data/sessions` | stored conversations (git-ignored) |
 
-## How it works
+## How it works (voice ≠ AI)
+
+**Voice never calls the LLM.** Mic / TTS are a separate feature. The shell injects a callback
+so a transcript is handed to the interview feature as plain text (same path as typing).
 
 ```
-mic ─► voice.js (speech-to-text, never calls the LLM)
-          │ transcript
-typed ────┴─► chat.js sendText() ─► POST /api/sessions/{id}/turn/stream  (SSE)
-                                      │
-                       interview/pipeline.py
-                         1. LLM extracts facts          ─► review gate (dossier/review.py)
-                         2. LLM writes the next question ─► streamed token by token
-                                      │
-                       chat bubble grows, then voice.speak(reply) ─► /api/tts
+ BROWSER                                                         BACKEND
+ ───────                                                         ───────
+  mic ──► voice.js  STT only
+            │  POST /api/stt  (or Web Speech in-browser)
+            │  → string "Wir sind zwei Gründer"
+            │
+            │  onTranscript(text)     ◄── injected in static/app.js
+            ▼                         voice.js STOPS HERE (no LLM)
+  chat.js sendText(text) ──────────► POST /api/sessions/{id}/turn/stream
+            ▲                          │  interview/routes.py  (HTTP/SSE)
+  typed ────┘                          ▼
+                                interview/pipeline.py
+                                  1. LLM write reply   → streamed tokens (immediate)
+                                  2. LLM extract facts + Belege → dossier (+ review gate)
+                                       │
+            ◄──────────────────────────┘  SSE: delta… done
+  bubble grows
+  voice.speak(reply) ──────────────► POST /api/tts → mp3  (still no LLM)
 ```
+
+| Layer | Module | Calls LLM? |
+|---|---|---|
+| Ears / mouth | `features/voice/` (`voice.js`, `stt`, `tts`, voice routes) | **No** |
+| Hand-off | `static/app.js` `onTranscript → chat.sendText` | No (wiring only) |
+| Brain | `features/interview/` (`chat.js`, `pipeline.py`, interview routes) | **Yes** |
+
+Restarting the server does **not** delete conversations — they are files under `DATA_DIR`
+(default `./data/sessions`). Check `GET /health` → `data_dir` / `sessions` if the sidebar looks empty.
+The left **Gespräche** rail is always visible (layout icons live in the top bar).
 
 **Review gate:** a fact for an empty field is written directly. If it differs from a filled field,
 a proposal card appears in the chat (`−` old, `+` new, plus a manual box). Nothing is overwritten
 until you pick one and press Speichern. Open proposals do not count for the score.
+**Belege / Belastbar** is LLM-judged (`DimensionState.belege`: concrete & readable evidence), not keyword hits; Speichern re-rates via `SCORE_BELEGE_SYSTEM`.
 
 ## Project structure
 

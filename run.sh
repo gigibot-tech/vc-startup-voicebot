@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Start the app after checking what it needs. Usage: ./run.sh   (UI_PORT=9000 ./run.sh)
+# Start the app after checking what it needs.
+# Usage:
+#   ./run.sh                 # uvicorn --reload (watches *.py under src/startup_voice)
+#   ./run.sh --no-watch      # no auto-reload
+#   UI_PORT=9000 ./run.sh
+#
+# JS/CSS/HTML live under features/*/ui and static/ — they do not restart the process;
+# the app sends Cache-Control: no-store so a normal refresh picks them up.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -14,6 +21,17 @@ PROVIDER="${LLM_PROVIDER:-$(env_get LLM_PROVIDER)}"; PROVIDER="${PROVIDER:-ollam
 MODEL="${LLM_MODEL:-$(env_get LLM_MODEL)}";          MODEL="${MODEL:-granite4.2:8b}"
 BASE="${LLM_BASE_URL:-$(env_get LLM_BASE_URL)}";     BASE="${BASE:-http://127.0.0.1:11434}"
 PORT="${UI_PORT:-$(env_get UI_PORT)}";               PORT="${PORT:-8140}"
+
+WATCH=1
+PASS_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --no-watch|--no-reload) WATCH=0 ;;
+    --watch|--reload)       WATCH=1 ;;
+    *) PASS_ARGS+=("$arg") ;;
+  esac
+done
+export UVICORN_RELOAD="$WATCH"
 
 [ -f .env ] && ok ".env found" || echo "! no .env (copy .env.example): spoken replies need ELEVENLABS_API_KEY"
 
@@ -34,5 +52,10 @@ fi
 
 uv sync --quiet
 ok "dependencies in sync"
+if [ "$WATCH" = "1" ]; then
+  ok "auto-reload on (uvicorn --reload); pass --no-watch to disable"
+else
+  echo "! auto-reload off"
+fi
 echo "→ http://127.0.0.1:$PORT/"
-exec uv run startup-voice
+exec uv run startup-voice "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
