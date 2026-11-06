@@ -13,6 +13,7 @@
  */
 
 import { clamp01, clampSpeed, fmt01 } from "../../shared/format.js";
+import { modelManager } from "../../shared/model-manager.js";
 import { applyChromeI18n } from "./chrome-i18n.js";
 import { prefs, savePrefs } from "./prefs.js";
 
@@ -21,6 +22,10 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
   const $ = (id) => document.getElementById(id);
   const appEl = $("app");
   const themeMq = window.matchMedia("(prefers-color-scheme: dark)");
+  /** @type {{destroy:()=>void}|null} */
+  let whisperCard = null;
+  /** @type {{destroy:()=>void}|null} */
+  let llmCard = null;
 
   function applyTheme() {
     const dark = prefs.theme === "dark" || (prefs.theme === "system" && themeMq.matches);
@@ -61,11 +66,54 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
       });
   }
 
+  function releaseIfActive(slotKey) {
+    const st = modelManager.getState(slotKey)?.state;
+    if (st === "downloading" || st === "warming_up" || st === "checking_cache") {
+      void modelManager.cancel(slotKey).catch(() => {});
+    }
+    if (st === "ready" || st === "running") {
+      void modelManager.dispose(slotKey).catch(() => {});
+    }
+  }
+
+  function syncModelCards() {
+    const whisperSlot = $("whisperModelSlot");
+    const llmSlot = $("llmModelSlot");
+    const stt = prefs.stt === "whisper";
+    const llm = prefs.llm === "transformers";
+    if (whisperSlot) {
+      whisperSlot.hidden = !stt;
+      if (stt && !whisperCard) whisperCard = modelManager.createModelCard(whisperSlot, "whisper");
+      if (!stt) {
+        releaseIfActive("whisper");
+        if (whisperCard) {
+          whisperCard.destroy();
+          whisperCard = null;
+        }
+      }
+    }
+    if (llmSlot) {
+      llmSlot.hidden = !llm;
+      if (llm && !llmCard) llmCard = modelManager.createModelCard(llmSlot, "llm");
+      if (!llm) {
+        releaseIfActive("llm");
+        if (llmCard) {
+          llmCard.destroy();
+          llmCard = null;
+        }
+      }
+    }
+  }
+
   function paint() {
     $("langSel").value = prefs.lang;
     $("voiceOn").checked = prefs.voice;
     if ($("voiceSpeedSel")) $("voiceSpeedSel").value = String(clampSpeed(prefs.speed));
     $("autoListen").checked = prefs.auto;
+    const sttSel = $("sttSel");
+    if (sttSel && prefs.stt && prefs.stt !== "auto") sttSel.value = prefs.stt;
+    const llmSel = $("llmSel");
+    if (llmSel) llmSel.value = prefs.llm === "transformers" ? "transformers" : "ollama";
     const ar = $("autoResolveMinSel");
     if (ar) {
       const v = String(prefs.autoResolveMin);
@@ -73,6 +121,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     }
     syncToneUi();
     syncVoiceDeps();
+    syncModelCards();
     applyTheme();
     applyLayout();
     syncToggles();
@@ -140,6 +189,11 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     });
     bindPref("sttSel", "change", (e) => e.value, "stt", () => {
       voice.applySttProvider();
+      syncModelCards();
+      onMetaChange?.();
+    });
+    bindPref("llmSel", "change", (e) => e.value, "llm", () => {
+      syncModelCards();
       onMetaChange?.();
     });
     bindPref("voiceOn", "change", (e) => e.checked, "voice", () => {

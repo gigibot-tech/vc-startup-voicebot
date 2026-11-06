@@ -290,10 +290,28 @@ def build_gap_queue(
 
 
 def build_extract_user(session: InterviewSession, user_text: str, focus: SlotId) -> str:
+    # Bundle all user lines since the last assistant turn prior to this reply, so any
+    # earlier turn whose extract was interrupted is still captured into the dossier.
+    trailing: list[str] = []
+    seen_assistant_after_user = False
+    for m in reversed(session.messages):
+        if m.role == "assistant":
+            if trailing:
+                break
+            seen_assistant_after_user = True
+            continue
+        if m.role == "user" and (m.content or "").strip():
+            trailing.append(m.content.strip())
+    void_flag = seen_assistant_after_user
+    del void_flag
+    trailing.reverse()
+    if user_text.strip() and (not trailing or trailing[-1] != user_text.strip()):
+        trailing.append(user_text.strip())
+    combined = "\n".join(trailing) or user_text.strip()
     return (
         f"Transcript (context only):\n{recent_history(session)}\n\n"
         f"Current focus slot: {focus}\n"
-        f"Latest founder statement (SOURCE OF TRUTH):\n{user_text.strip()}"
+        f"Latest founder statement (SOURCE OF TRUTH):\n{combined}"
     )
 
 
@@ -340,6 +358,39 @@ def build_reply_prompt(
         (m.content for m in reversed(session.messages) if m.role == "assistant"),
         "",
     )
+    # Collect ALL user turns since the last assistant reply (in case an earlier turn's
+    # extract was interrupted before saving), so nothing the founder said is lost.
+    trailing_user_lines: list[str] = []
+    for m in reversed(session.messages):
+        if m.role == "assistant":
+            break
+        if m.role == "user" and (m.content or "").strip():
+            trailing_user_lines.append(m.content.strip())
+    trailing_user_lines.reverse()
+    if user_text.strip() and (
+        not trailing_user_lines or trailing_user_lines[-1] != user_text.strip()
+    ):
+        trailing_user_lines.append(user_text.strip())
+    combined_user_text = "\n".join(trailing_user_lines) or user_text.strip()
+
+    # Did we ALREADY ask about `ask` on the previous assistant turn?
+    # When the founder just answered after a question on `ask` (and gave a substantive
+    # statement > 3 words), advance primary focus to the next incomplete slot so the
+    # LLM does not parrot the same slot blueprint a second time in a row.
+    substantive_answer = len(combined_user_text.split()) >= 4
+    already_asked_focus = bool(
+        prev
+        and session.turn_index >= 2
+        and substantive_answer
+        and float(cov.get(ask) or 0) == 0.0
+    )
+    gap_queue = build_gap_queue(session, primary=ask)
+    if already_asked_focus and len(gap_queue) > 1:
+        # Rotate the just-answered slot behind the next open slot so ASK_NOW moves forward.
+        gap_queue = gap_queue[1:] + gap_queue[:1]
+        ask = gap_queue[0]["slot"]
+        spec = DIMENSIONS_SPEC[ask]
+
     empty_slots = [s for s in SLOT_ORDER if float(cov.get(s) or 0) <= 0]
     incomplete_slots = [s for s in SLOT_ORDER if float(cov.get(s) or 0) < 1.0]
     phase = "breadth" if empty_slots else "depth"
@@ -374,7 +425,6 @@ def build_reply_prompt(
         (slot_question if ask == prior else DEFAULT_SLOT_QUESTIONS.get(ask, ""))
         or ", ".join(spec.prompt_hints)
     )
-    gap_queue = build_gap_queue(session, primary=ask)
     next_slot_entry = gap_queue[1] if len(gap_queue) > 1 else None
     next_slot_hint = (
         f"{next_slot_entry['slot']} ({next_slot_entry['label']}) — "
@@ -408,10 +458,11 @@ def build_reply_prompt(
                 "market/product/team for sharper numbers when another slot is still open."
             )
         )
+    history_block = recent_history(session, last=6)
     user = (
         f"phase: {phase}.\n"
         f"followup_mode: {followup_mode}.\n"
-        f"ASK_NOW (pre-extract): {ask} ({spec.label}) — missing before this turn: "
+        f"ASK_NOW: {ask} ({spec.label}) — missing before this turn: "
         f"{missing_in_ask or 'none'}.\n"
         f"NEXT_SLOT if Founder just answered ASK_NOW: {next_slot_hint}\n"
         f"GAP_QUEUE (ordered): {json.dumps(gap_queue, ensure_ascii=False)}\n"
@@ -426,9 +477,11 @@ def build_reply_prompt(
         "If ready_for_closing or all GAP_QUEUE items are now answered by 'Founder just said': "
         "wrap up + [[intake:end]].\n"
         f"ASK_NOW blueprint (ONLY for aspects not just answered): {slot_ask}\n"
-        f"Founder just said (NOT in dossier yet — credit this first!): {user_text[:900]}\n"
+        f"Recent transcript:\n{history_block}\n"
+        f"Founder just said (NOT in dossier yet — credit this first!): "
+        f"{combined_user_text[:1200]}\n"
         f"Dossier so far (from PRIOR turns): {json.dumps(dossier, ensure_ascii=False)}\n"
-        f"Do NOT repeat: {prev[:240]}\n"
+        f"FORBIDDEN to repeat or paraphrase your previous question: {prev[:280]}\n"
         f"{followup}"
     )
     system = (

@@ -251,6 +251,41 @@ button, select, input { font: inherit; color: inherit; }
 }
 .setting input[type="checkbox"] { width: 1rem; height: 1rem; accent-color: var(--htgf-berry); }
 
+/* Reusable Transformers.js model download / status card (Whisper + LLM). */
+.model-card-slot { width: 100%; margin-top: 0.35rem; }
+.model-card {
+  display: flex; flex-direction: column; gap: 0.45rem;
+  width: min(100%, 22rem); padding: 0.55rem 0.7rem;
+  border: 1px solid var(--htgf-border); border-radius: 0.75rem;
+  background: var(--htgf-base);
+}
+.model-card__head {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.35rem;
+}
+.model-card__badge { font-size: 0.72rem; font-weight: 600; opacity: 0.85; }
+.model-card__pill {
+  font-size: 0.65rem; font-weight: 700; letter-spacing: 0.02em;
+  padding: 0.15rem 0.45rem; border-radius: 999px;
+  background: color-mix(in srgb, var(--htgf-berry) 12%, transparent);
+}
+.model-card__pill[data-state="ready"] { background: color-mix(in srgb, #2e7d4f 18%, transparent); }
+.model-card__pill[data-state="error"] { background: color-mix(in srgb, #b3261e 18%, transparent); }
+.model-card__pill[data-state="downloading"],
+.model-card__pill[data-state="warming_up"],
+.model-card__pill[data-state="running"] {
+  background: color-mix(in srgb, var(--htgf-berry) 22%, transparent);
+}
+.model-card__bar {
+  height: 0.35rem; border-radius: 999px; overflow: hidden;
+  background: color-mix(in srgb, var(--htgf-border) 80%, transparent);
+}
+.model-card__bar > i {
+  display: block; height: 100%; width: 0;
+  background: var(--htgf-berry); transition: width 0.15s ease;
+}
+.model-card__meta { font-size: 0.68rem; opacity: 0.65; margin-top: 0.25rem; }
+.model-card__actions { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+
 .sidebar {
   flex-direction: column; gap: 0.5rem; padding: 0.75rem;
   border-right: 1px solid var(--htgf-border); overflow: hidden;
@@ -392,16 +427,34 @@ button, select, input { font: inherit; color: inherit; }
   animation: micPulse 1s ease infinite;
 }
 .mic-btn.is-thinking {
-  background: color-mix(in srgb, var(--htgf-berry) 75%, #1a1814);
-  color: #fff;
+  background: var(--htgf-base);
+  color: var(--htgf-contrast);
+  box-shadow: inset 0 0 0 1.25px var(--htgf-border);
+  font-weight: 500;
+  opacity: 0.85;
+}
+.mic-btn.is-thinking .mic-btn__dot {
+  background: var(--htgf-berry);
+  animation: micPulse 1.1s ease infinite;
 }
 .mic-btn.is-speaking {
-  background: color-mix(in srgb, var(--htgf-contrast) 85%, var(--htgf-berry));
-  color: #fff;
+  background: var(--htgf-base);
+  color: var(--htgf-contrast);
+  box-shadow: inset 0 0 0 1.25px var(--htgf-border);
 }
 .mic-btn.is-speaking .mic-btn__dot {
   background: var(--htgf-lime);
   animation: micPulse 1.4s ease infinite;
+}
+.mic-btn.is-extracting {
+  background: color-mix(in srgb, var(--htgf-berry) 10%, var(--htgf-base));
+  color: var(--htgf-contrast);
+  box-shadow: inset 0 0 0 1.25px color-mix(in srgb, var(--htgf-berry) 40%, var(--htgf-border));
+  font-weight: 500;
+}
+.mic-btn.is-extracting .mic-btn__dot {
+  background: var(--htgf-berry);
+  animation: micPulse 1.2s ease infinite;
 }
 @keyframes micPulse {
   0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255,255,255,0.35); }
@@ -535,6 +588,14 @@ button, select, input { font: inherit; color: inherit; }
 .dossier-head h2 { margin: 0; }
 .dossier-head h2 em { font-family: var(--font-face); font-style: normal; font-weight: 400; }
 .dossier-meta { margin: 0; font-size: 0.8rem; opacity: 0.7; word-break: break-all; }
+.dossier-updating {
+  display: flex; align-items: center; gap: 0.5rem;
+  margin: 0.45rem 0 0.25rem; padding: 0.45rem 0.65rem;
+  border-radius: 0.65rem; font-size: 0.76rem; font-weight: 600; line-height: 1.35;
+  border: 1px solid color-mix(in srgb, var(--htgf-berry) 40%, var(--htgf-border));
+  background: color-mix(in srgb, var(--htgf-berry) 11%, var(--htgf-base));
+}
+.dossier-updating[hidden] { display: none !important; }
 .finalize-block {
   margin-top: 1.35rem; padding-top: 1.1rem; border-top: 1px solid var(--htgf-border);
   display: flex; flex-direction: column; align-items: flex-start; gap: 0.45rem;

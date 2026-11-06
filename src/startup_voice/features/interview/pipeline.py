@@ -212,11 +212,12 @@ class InterviewPipeline:
         self._store.save(session)
         return session
 
-    def continue_interview(self, session: InterviewSession) -> tuple[InterviewSession, str]:
-        """Generate the next deeper analyst question when the user clicks 'Weiter fragen'."""
+    def _continue_prompt_parts(
+        self, session: InterviewSession
+    ) -> tuple[str, str, SlotId]:
+        """Build continue-question prompts (shared by server LLM and browser prepare)."""
         refresh_evaluation(session)
         ev = session.evaluation
-        # Pick incomplete slot first; otherwise the slot with lowest specificity/belege.
         target: SlotId = ev.next_focus_slot or min(
             SLOT_ORDER,
             key=lambda s: (
@@ -246,8 +247,31 @@ class InterviewPipeline:
             f"Recent transcript:\n{recent_history(session, last=6)}\n"
             f"Do NOT repeat: {prev_q[:240]}"
         )
+        return system, user, target
+
+    def continue_interview(self, session: InterviewSession) -> tuple[InterviewSession, str]:
+        """Generate the next deeper analyst question when the user clicks 'Weiter fragen'."""
+        system, user, _target = self._continue_prompt_parts(session)
         raw = self._complete(system, user, max_tokens=reply_token_budget()).strip()
-        question, _, _ = split_reply_marks(raw)
+        return self.commit_continue(session, raw)
+
+    def prepare_continue(self, session: InterviewSession) -> dict[str, Any]:
+        """Prompts for browser LLM continue-asking (no model call)."""
+        system, user, target = self._continue_prompt_parts(session)
+        self._store.save(session)
+        return {
+            "target": target,
+            "reply_system": system,
+            "reply_user": user,
+            "reply_max_tokens": reply_token_budget(),
+            "session": session.model_dump(),
+        }
+
+    def commit_continue(
+        self, session: InterviewSession, raw_reply: str
+    ) -> tuple[InterviewSession, str]:
+        """Persist a browser- or server-produced continue question."""
+        question, _, _ = split_reply_marks(raw_reply)
         if not question:
             raise RuntimeError("LLM returned empty follow-up question")
         session.messages.append(
@@ -263,6 +287,85 @@ class InterviewPipeline:
         session.messages.append(TurnMessage(role="user", content=user_text.strip()))
         session.turn_index += 1
         return (session.evaluation.next_focus_slot if session.evaluation else None) or "team"
+
+    def prepare_client_turn(self, session: InterviewSession, user_text: str) -> dict[str, Any]:
+        """Record the user line and return reply+extract prompts for a browser LLM.
+
+        Same prompt builders as ``process_turn`` / ``stream_turn`` — no model call here.
+        If the session already ends with the same user line (e.g. Retry), reuse it instead
+        of stacking duplicate user bubbles.
+        """
+        cleaned = user_text.strip()
+        if (
+            session.messages
+            and session.messages[-1].role == "user"
+            and session.messages[-1].content == cleaned
+        ):
+            focus = (session.evaluation.next_focus_slot if session.evaluation else None) or "team"
+        else:
+            focus = self._begin_user_turn(session, user_text)
+        ask = (session.evaluation.next_focus_slot if session.evaluation else None) or focus
+        reply_system, reply_user = self._preprocess_reply(session, user_text, ask)
+        extract_user = build_extract_user(session, user_text, focus)
+        self._store.save(session)
+        return {
+            "focus": focus,
+            "reply_system": reply_system,
+            "reply_user": reply_user,
+            "extract_system": EXTRACT_SYSTEM,
+            "extract_user": extract_user,
+            "reply_max_tokens": reply_token_budget(user_text),
+            "extract_max_tokens": extract_token_budget(user_text),
+            "turn_index": session.turn_index,
+            "session": session.model_dump(),
+        }
+
+    def commit_client_reply(
+        self, session: InterviewSession, raw_reply: str
+    ) -> tuple[InterviewSession, str, bool]:
+        """Persist the spoken reply right after Call #1 (before browser Call #2 extract runs)."""
+        reply, _mark_extract, offer_end = split_reply_marks(raw_reply)
+        if not reply:
+            raise RuntimeError("LLM returned empty reply")
+        if session.evaluation and session.evaluation.ready_for_closing:
+            offer_end = True
+        if (
+            session.messages
+            and session.messages[-1].role == "assistant"
+            and session.messages[-1].content == reply
+        ):
+            return session, reply, offer_end
+        session.messages.append(TurnMessage(role="assistant", content=reply))
+        self._store.save(session)
+        return session, reply, offer_end
+
+    def commit_client_turn(
+        self,
+        session: InterviewSession,
+        *,
+        raw_reply: str,
+        raw_extract: str,
+        user_text: str | None = None,
+    ) -> tuple[InterviewSession, str, bool]:
+        """Apply browser LLM reply + extract through the same review/score gate as server turns."""
+        text = (user_text or "").strip()
+        if not text:
+            for m in reversed(session.messages):
+                if m.role == "user":
+                    text = m.content
+                    break
+        session, reply, offer_end = self.commit_client_reply(session, raw_reply)
+        updates, belege = _parse_extract(raw_extract)
+        touched = apply_extract_updates(
+            session, updates, belege, turn=session.turn_index, source="chat"
+        )
+        eval_result = refresh_evaluation(session)
+        if eval_result.ready_for_closing:
+            offer_end = True
+        self._persist_turn(
+            session, text, touched, eval_result, reply, append_reply=False
+        )
+        return session, reply, offer_end
 
     def process_turn(self, session: InterviewSession, user_text: str) -> InterviewSession:
         focus = self._begin_user_turn(session, user_text)

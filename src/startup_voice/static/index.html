@@ -57,11 +57,24 @@
         <label class="setting setting-row"><span>STT</span>
           <select id="sttSel" aria-label="Speech recognition">
             <option value="elevenlabs">ElevenLabs</option>
+            <option value="whisper">Whisper (Browser)</option>
             <option value="deepgram">Deepgram</option>
             <option value="browser">Web Speech</option>
           </select>
         </label>
+        <div id="whisperModelSlot" class="model-card-slot" hidden></div>
         <p class="prefs-hint">Interview language (DE/EN) is in the header — applies to the open session and new ones.</p>
+      </div>
+      <div class="prefs-group" aria-label="Reply model">
+        <span class="prefs-group-label">Reply model</span>
+        <label class="setting setting-row"><span>LLM</span>
+          <select id="llmSel" aria-label="Reply model">
+            <option value="ollama">Ollama (Server)</option>
+            <option value="transformers">Transformers.js (WebGPU)</option>
+          </select>
+        </label>
+        <div id="llmModelSlot" class="model-card-slot" hidden></div>
+        <p class="prefs-hint">Transformers.js runs reply + 5-slot extract in the browser on the same loaded model.</p>
       </div>
       <div class="prefs-group" aria-label="Speech output">
         <span class="prefs-group-label">Speech output</span>
@@ -206,6 +219,10 @@
             <span class="dossier-chip" title="Dossier-Fortschritt"><span id="dossierPct">0%</span></span>
           </div>
           <p class="dossier-meta" id="dossierMeta">Kein Gespräch geladen</p>
+          <div class="dossier-updating" id="dossierUpdating" role="status" aria-live="polite" hidden>
+            <span class="process-banner__dot" aria-hidden="true"></span>
+            <span id="dossierUpdatingText">Updating dossier… best wait before speaking/sending so the agent doesn’t ask the same question again.</span>
+          </div>
           <div class="progress" aria-label="Fortschritt"><span id="progressBar"></span></div>
           <div class="slots" id="slots"></div>
           <details class="fold catalog-panel" id="catalogPanel">

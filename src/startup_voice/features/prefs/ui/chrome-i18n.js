@@ -113,10 +113,17 @@ export function applyChromeI18n(lang) {
     const key = el.getAttribute("data-i18n-aria");
     if (key) el.setAttribute("aria-label", t(key, code));
   });
-  // Mic label may be recreated; keep Speak/Sprechen in sync when idle.
-  const micLabel = document.querySelector("#micBtn .mic-btn__label");
-  if (micLabel && !document.getElementById("app")?.classList.contains("is-listening")) {
-    const pressed = document.getElementById("micBtn")?.getAttribute("aria-pressed") === "true";
+  // Mic label may be recreated; keep Speak/Sprechen in sync only when completely idle.
+  const micBtn = document.getElementById("micBtn");
+  const micLabel = micBtn?.querySelector(".mic-btn__label");
+  if (
+    micLabel
+    && !document.getElementById("app")?.classList.contains("is-listening")
+    && !micBtn.classList.contains("is-thinking")
+    && !micBtn.classList.contains("is-speaking")
+    && !micBtn.classList.contains("is-extracting")
+  ) {
+    const pressed = micBtn.getAttribute("aria-pressed") === "true";
     if (!pressed) micLabel.textContent = t("speak", code);
   }
 }

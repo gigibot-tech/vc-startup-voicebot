@@ -132,6 +132,11 @@ export function confirmInterruptProcess(lang = "de") {
   }[kind] || kind;
   const msg = p?.message || kindLabel;
   const sessionBit = p?.label || sessionProcessLabel(p?.sessionId || appState.sessionId) || "—";
+  if (kind === "extract") {
+    return confirm(de
+      ? `Dossier wird noch aktualisiert (${msg}).\nGespräch: ${sessionBit}\n\n⚠ Wenn Sie jetzt unterbrechen, sind Ihre letzten Angaben noch nicht im Dossier gespeichert — der Agent stellt sonst möglicherweise dieselbe Frage noch einmal.\n\nTrotzdem unterbrechen?`
+      : `Dossier is still updating (${msg}).\nSession: ${sessionBit}\n\n⚠ If you interrupt now, your latest answer won't be saved to the dossier yet — the agent may ask the same question again.\n\nInterrupt anyway?`);
+  }
   return confirm(de
     ? `Prozess läuft noch (${msg})\nGespräch: ${sessionBit}\n\nWirklich unterbrechen?`
     : `A process is still running (${msg})\nSession: ${sessionBit}\n\nInterrupt anyway?`);

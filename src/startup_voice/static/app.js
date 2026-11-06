@@ -13,11 +13,13 @@
  *   shared/state.js                          appState + stale-response guard
  */
 import { api } from "./shared/api.js";
+import { modelManager } from "./shared/model-manager.js";
 import {
-  appState, activeId, activeSession, confirmInterruptProcess, isPicker, nav, subscribe,
+  appState, activeId, activeSession, clearProcessBusy, confirmInterruptProcess, isPicker, nav,
+  setProcessBusy, subscribe,
 } from "./shared/state.js";
 import { createVoice } from "./features/voice/voice.js";
-import { prefs } from "./features/prefs/prefs.js";
+import { prefs, savePrefs } from "./features/prefs/prefs.js";
 import { createSettings } from "./features/prefs/settings.js";
 import { createSessions, readUrlSessionId, syncUrl } from "./features/sessions/lifecycle.js";
 import { renderMeta } from "./features/sessions/meta.js";
@@ -99,11 +101,29 @@ function showMeta() {
   renderMeta({ sttLabel: voice.sttLabel, prefLanguage });
 }
 
-/** Topbar process strip: kind + message + which session owns the work. */
+/** Topbar process strip + Live Dossier updating notice. */
 function paintProcessBanner() {
   const el = $("processBanner");
-  if (!el) return;
   const p = appState.processBusy;
+  const lang = currentLanguage();
+  const de = String(lang).startsWith("de");
+
+  // Sync the inline notice right under "Live dossier / Session … · Turn N"
+  const dosUpd = $("dossierUpdating");
+  const dosUpdText = $("dossierUpdatingText");
+  const isExtractingThisSession = Boolean(
+    p && p.kind === "extract" && (!activeId() || p.sessionId === activeId()),
+  );
+  if (dosUpd) {
+    dosUpd.hidden = !isExtractingThisSession;
+    if (isExtractingThisSession && dosUpdText) {
+      dosUpdText.textContent = de
+        ? "Dossier wird gerade aktualisiert — am besten kurz warten, bevor Sie weitersprechen/senden (sonst stellt der Agent evtl. dieselbe Frage erneut)."
+        : "Updating dossier right now — best wait a moment before speaking or sending (interrupting may cause the agent to ask the same question again).";
+    }
+  }
+
+  if (!el) return;
   if (!p) {
     el.hidden = true;
     el.classList.remove("is-on");
@@ -111,19 +131,19 @@ function paintProcessBanner() {
     el.setAttribute("aria-busy", "false");
     return;
   }
-  const lang = currentLanguage();
   const fallback = {
     extract: t("updatingDossier", lang),
     turn: t("thinking", lang),
     open: t("loadingSession", lang),
     finalize: t("finalizingDossier", lang),
+    model: "Loading model…",
   }[p.kind] || t("thinking", lang);
   const label = $("processBannerLabel");
   const sessionEl = $("processBannerSession");
   if (label) label.textContent = p.message || fallback;
   if (sessionEl) {
     sessionEl.textContent = p.label
-      ? (String(lang).startsWith("de") ? `Gespräch: ${p.label}` : `Session: ${p.label}`)
+      ? (de ? `Gespräch: ${p.label}` : `Session: ${p.label}`)
       : "";
   }
   el.dataset.kind = p.kind || "";
@@ -145,30 +165,44 @@ function renderListUi() {
 /** Disable the composer while a turn is streaming or a conversation is opening. */
 function syncComposerBusy() {
   const turnBusy = Boolean(appState.loading && appState.loadingKind === "turn");
+  const extractBusy = Boolean(
+    appState.processBusy
+    && appState.processBusy.kind === "extract"
+    && appState.processBusy.sessionId === activeId(),
+  );
   const busy = turnBusy || Boolean(appState.loading && appState.loadingKind === "open");
   textInput.disabled = busy;
   const sendBtn = $("sendBtn");
+  const de = currentLanguage().startsWith("de");
   if (sendBtn) {
     sendBtn.disabled = busy;
-    const de = prefLanguage() === "de";
     sendBtn.textContent = turnBusy
       ? (de ? "Wartet…" : "Waiting…")
       : (de ? "Senden" : "Send");
   }
   const hint = $("composerHint");
   if (hint) {
-    hint.hidden = !turnBusy;
-    if (!turnBusy) delete hint.dataset.live;
-    // chat.js sets dataset.live + phase text on SSE `status`; don't clobber it on re-render.
-    else if (!hint.dataset.live) {
-      hint.textContent = prefLanguage() === "de"
-        ? "Antwort wird verarbeitet… Mic = Abbrechen"
-        : "Processing reply… Mic = Cancel";
+    if (turnBusy) {
+      hint.hidden = false;
+      if (!hint.dataset.live) {
+        hint.textContent = de
+          ? "Antwort wird generiert… Bitte kurz warten."
+          : "Generating reply… Please wait.";
+      }
+    } else if (extractBusy) {
+      hint.hidden = false;
+      delete hint.dataset.live;
+      hint.textContent = de
+        ? "Dossier wird aktualisiert — am besten kurz warten (Sprechen/Senden jetzt fragt vor dem Abbruch nach)."
+        : "Updating dossier — best wait a moment (speaking/sending now will ask before interrupting).";
+    } else {
+      hint.hidden = true;
+      delete hint.dataset.live;
     }
   }
-  if (turnBusy) textInput.placeholder = prefLanguage() === "de" ? "Einen Moment…" : "One moment…";
+  if (turnBusy) textInput.placeholder = de ? "Einen Moment…" : "One moment…";
   else if (!textInput.value) {
-    textInput.placeholder = prefLanguage() === "de" ? "Antwort schreiben…" : "Write a reply…";
+    textInput.placeholder = de ? "Antwort schreiben…" : "Write a reply…";
   }
 }
 
@@ -237,6 +271,22 @@ subscribe(() => {
   renderView();
 });
 
+// Sync model download / warm-up progress into the topbar process banner.
+modelManager.setProcessBannerHook((info) => {
+  if (!info?.active) {
+    if (appState.processBusy?.kind === "model") clearProcessBusy();
+    return;
+  }
+  // Don't clobber an in-flight turn/extract banner.
+  if (appState.processBusy && appState.processBusy.kind !== "model") return;
+  const sid = activeId() || "model";
+  setProcessBusy({
+    kind: "model",
+    sessionId: sid,
+    message: info.message || "Loading model…",
+  });
+});
+
 /** Load labels, settings and sessions, then open the right screen. */
 async function boot() {
   // Paint picker immediately so Start new chat is never stuck hidden before network returns.
@@ -249,12 +299,21 @@ async function boot() {
       voice.setProviders(Array.isArray(health.stt_providers) && health.stt_providers.length
         ? health.stt_providers
         : [health.stt || "browser"]);
-      if (prefs.stt === "auto" || !prefs.stt) prefs.stt = health.stt || voice.resolveSttProvider();
+      if (prefs.stt === "auto" || !prefs.stt) {
+        // Prefer cloud STT from health; otherwise Whisper (browser) over Web Speech.
+        const server = health.stt;
+        prefs.stt = (server && server !== "browser") ? server : voice.resolveSttProvider();
+        savePrefs();
+      }
       voice.applySttProvider();
       settings.syncToneUi();
     } catch {
       voice.setProviders(["browser"]);
-      voice.useBrowser();
+      if (prefs.stt === "auto" || !prefs.stt) {
+        prefs.stt = "whisper";
+        savePrefs();
+      }
+      voice.applySttProvider();
     }
     const list = await sessions.refreshPicker();
     const fromUrl = readUrlSessionId();

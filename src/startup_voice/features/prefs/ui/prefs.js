@@ -11,6 +11,8 @@ const DEFAULTS = {
   dossier: "below",
   sidebarOpen: false, // sessions rail collapsed by default; expand via topbar
   stt: "auto", stability: 0.45, similarity: 0.75,
+  /** ollama = server LLM; transformers = browser WebGPU via Transformers.js */
+  llm: "ollama",
   prefsOpen: false, // settings bar collapsed by default
   /** Auto-accept incoming conflicts when confidence >= this (1.01 = off). */
   autoResolveMin: 0.75,
@@ -39,6 +41,7 @@ prefs.similarity = clamp01(prefs.similarity, 0.75);
   const n = Number(prefs.autoResolveMin);
   prefs.autoResolveMin = Number.isFinite(n) ? n : 0.75;
 }
+if (prefs.llm !== "transformers" && prefs.llm !== "ollama") prefs.llm = "ollama";
 prefs._v = PREFS_VERSION;
 
 export const savePrefs = () => localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));

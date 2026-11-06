@@ -417,3 +417,113 @@ def test_api_turn_stream_falls_back_without_stream_method(tmp_path: Path, monkey
     sid = client.post("/api/sessions").json()["session"]["id"]
     r = client.post(f"/api/sessions/{sid}/turn/stream", json={"text": "Hallo"})
     assert "event: delta" in r.text and "event: done" in r.text
+
+
+def test_prepare_client_turn_returns_prompts_without_llm(tmp_path: Path):
+    """Browser path: prepare records the user line and returns reply+extract prompts."""
+
+    class NoCallLLM(StubExtractLLM):
+        def complete(self, *a, **k):
+            raise AssertionError("prepare must not call the LLM")
+
+    pipe = InterviewPipeline(NoCallLLM(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    payload = pipe.prepare_client_turn(session, "Wir sind zwei Gründer.")
+    assert payload["reply_system"]
+    assert payload["reply_user"]
+    assert "extract" in payload["extract_system"].lower() or "json" in payload["extract_system"].lower()
+    assert payload["extract_user"]
+    assert payload["focus"] in ("team", "product", "traction", "market", "financing")
+    assert session.turn_index == 1
+    assert session.messages[-1].role == "user"
+    assert "zwei Gründer" in session.messages[-1].content
+
+
+def test_commit_client_turn_applies_extract(tmp_path: Path):
+    pipe = InterviewPipeline(StubExtractLLM(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    pipe.prepare_client_turn(session, "Wir sind zwei Gründer Vollzeit.")
+    raw_reply = "Danke. Wie groß ist der Markt?\n[[dossier:yes]]"
+    raw_extract = json.dumps(
+        {
+            "updates": {
+                "team": {
+                    "summary": "Zwei Gründer Vollzeit",
+                    "evidence": ["Vollzeit"],
+                    "fields": {
+                        "founders_roles": "CEO und CTO",
+                        "background_expertise": "SaaS",
+                        "commitment_fulltime": "Vollzeit",
+                    },
+                    "missing_or_vague": [],
+                }
+            },
+            "belege": {"team": 0.7},
+        },
+        ensure_ascii=False,
+    )
+    session, reply, offer_end = pipe.commit_client_turn(
+        session, raw_reply=raw_reply, raw_extract=raw_extract
+    )
+    assert reply == "Danke. Wie groß ist der Markt?"
+    assert session.messages[-1].role == "assistant"
+    assert session.messages[-1].content == reply
+    assert "Vollzeit" in (session.objects["team"].fields.get("commitment_fulltime") or "")
+    assert isinstance(offer_end, bool)
+
+
+def test_api_prepare_commit_roundtrip(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    client = TestClient(create_app(llm=StubExtractLLM()))
+    sid = client.post("/api/sessions").json()["session"]["id"]
+    prep = client.post(
+        f"/api/sessions/{sid}/turn/prepare",
+        json={"text": "Wir sind zwei Gründer."},
+    )
+    assert prep.status_code == 200
+    body = prep.json()
+    assert body["reply_system"] and body["extract_user"]
+    commit = client.post(
+        f"/api/sessions/{sid}/turn/commit",
+        json={
+            "raw_reply": "Danke. Nächste Frage?\n[[dossier:yes]]",
+            "raw_extract": json.dumps(
+                {
+                    "updates": {
+                        "team": {
+                            "summary": "Zwei Gründer",
+                            "evidence": ["zwei"],
+                            "fields": {
+                                "founders_roles": "CEO und CTO",
+                                "background_expertise": "",
+                                "commitment_fulltime": "",
+                            },
+                            "missing_or_vague": ["background_expertise"],
+                        }
+                    }
+                }
+            ),
+            "text": "Wir sind zwei Gründer.",
+        },
+    )
+    assert commit.status_code == 200
+    data = commit.json()
+    assert data["reply"] == "Danke. Nächste Frage?"
+    assert data["session"]["messages"][-1]["content"] == "Danke. Nächste Frage?"
+    assert "Zwei Gründer" in (data["session"]["objects"]["team"]["summary"] or "")
+
+
+def test_prepare_continue_and_commit(tmp_path: Path):
+    class NoCallLLM(StubExtractLLM):
+        def complete(self, *a, **k):
+            raise AssertionError("prepare_continue must not call the LLM")
+
+    pipe = InterviewPipeline(NoCallLLM(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    payload = pipe.prepare_continue(session)
+    assert payload["reply_system"] and payload["reply_user"]
+    session, question = pipe.commit_continue(
+        session, "Eine konkrete Nachfrage zum Markt?\n[[dossier:no]]"
+    )
+    assert question == "Eine konkrete Nachfrage zum Markt?"
+    assert session.messages[-1].content == question

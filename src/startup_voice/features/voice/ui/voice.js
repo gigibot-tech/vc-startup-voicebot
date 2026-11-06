@@ -166,31 +166,43 @@ export function createVoice({
     dock?.classList.toggle("is-listening", Boolean(listening));
     if (bar) bar.hidden = !listening;
   };
+  let extractBusyInDock = false;
   const syncMicLabels = () => {
     const de = String(getLanguage?.() || "de").toLowerCase().startsWith("de");
+    const dock = document.getElementById("speakDock");
     let label = de ? "Sprechen" : "Speak";
     let title = de ? "Antwort diktieren" : "Dictate a reply";
     let live = false;
     let thinking = false;
     let speaking = false;
+    const extracting = Boolean(extractBusyInDock && voicePhase === "idle");
     if (voicePhase === "listening") {
       label = de ? "Stopp" : "Stop";
       title = de ? "Aufnahme beenden und senden" : "Stop recording and send";
       live = true;
     } else if (voicePhase === "speaking") {
-      label = de ? "Stimme stoppen" : "Stop voice";
-      title = de ? "Agentenstimme stoppen" : "Stop agent voice";
+      label = de ? "Stimme stoppen" : "Mute voice";
+      title = de ? "Vorlesen überspringen (Dossier läuft weiter)" : "Skip audio playback (dossier update continues)";
       speaking = true;
     } else if (voicePhase === "thinking") {
-      label = de ? "Abbrechen" : "Cancel";
-      title = de ? "Verarbeitung abbrechen" : "Cancel processing";
+      label = de ? "Verarbeitet… (Abbrechen)" : "Working… (Cancel)";
+      title = de ? "Verarbeitung abbrechen" : "Cancel current request";
       thinking = true;
+    } else if (extracting) {
+      label = de ? "Dossier aktualisiert… (bitte warten)" : "Updating dossier… (best wait)";
+      title = de
+        ? "Dossier wird noch aktualisiert — klicken unterbricht das Update"
+        : "Dossier is still updating — clicking interrupts the update";
     }
+    dock?.classList.toggle("is-thinking", thinking);
+    dock?.classList.toggle("is-speaking", speaking);
+    dock?.classList.toggle("is-extracting", extracting);
     micButtons().forEach((btn) => {
       btn.classList.toggle("is-live", live);
       btn.classList.toggle("is-thinking", thinking);
       btn.classList.toggle("is-speaking", speaking);
-      btn.classList.toggle("recording", live || speaking);
+      btn.classList.toggle("is-extracting", extracting);
+      btn.classList.toggle("recording", live);
       const labelEl = btn.querySelector(".mic-btn__label");
       if (labelEl) labelEl.textContent = label;
       else btn.textContent = label;
@@ -198,6 +210,12 @@ export function createVoice({
       btn.title = title;
     });
     syncListenBar(live);
+  };
+  const setExtractBusy = (busy) => {
+    const next = Boolean(busy);
+    if (extractBusyInDock === next) return;
+    extractBusyInDock = next;
+    syncMicLabels();
   };
   const setVoicePhase = (phase, statusText) => {
     voicePhase = phase;
@@ -277,17 +295,21 @@ export function createVoice({
   }
   const sttLabel = () => ({
     elevenlabs: "ElevenLabs STT",
+    whisper: "Whisper (Browser)",
     deepgram: "Deepgram",
     browser: "Web Speech",
   }[sttProvider] || sttProvider);
 
   function resolveSttProvider() {
+    // Whisper runs fully in-browser — always selectable without server keys.
+    if (prefs.stt === "whisper") return "whisper";
     if (prefs.stt && prefs.stt !== "auto" && sttProviders.includes(prefs.stt)) {
       return prefs.stt;
     }
     if (sttProviders.includes("elevenlabs")) return "elevenlabs";
     if (sttProviders.includes("deepgram")) return "deepgram";
-    return "browser";
+    // Plan: Whisper is the default fallback when cloud STT keys are absent.
+    return "whisper";
   }
 
   function applySttProvider() {
@@ -295,9 +317,11 @@ export function createVoice({
     const sel = document.getElementById("sttSel");
     if (sel) {
       [...sel.options].forEach((opt) => {
-        opt.disabled = opt.value !== "browser" && !sttProviders.includes(opt.value);
+        const always = opt.value === "browser" || opt.value === "whisper";
+        opt.disabled = !always && !sttProviders.includes(opt.value);
       });
-      sel.value = sttProviders.includes(prefs.stt) ? prefs.stt : sttProvider;
+      if (prefs.stt === "whisper") sel.value = "whisper";
+      else sel.value = sttProviders.includes(prefs.stt) ? prefs.stt : sttProvider;
     }
     onProviderChange();
   }
@@ -457,7 +481,8 @@ export function createVoice({
   function afterSpeak() {
     clearAwaitingGreeting();
     if (voicePhase === "speaking") setVoicePhase("idle");
-    if (prefs.auto && canListen()) startListening();
+    // Do NOT auto-open the mic while dossier extract is still running — wait until it finishes!
+    if (prefs.auto && !extractBusyInDock && canListen()) startListening();
   }
 
   async function playTtsClip(text, gen) {
@@ -543,9 +568,11 @@ export function createVoice({
     if (!speakStreamOn || (!prefs.voice && !speakForce) || !chunk) return;
     speakBuf += chunk;
     for (;;) {
-      // Never speak a trailing / partial [[dossier:…]] gate.
-      let visible = speakBuf.replace(/\s*\[\[\s*dossier\s*:\s*(yes|no)\s*\]\]\s*$/i, "");
-      const hold = visible.search(/\[\[\s*dossier/i);
+      // Never speak a trailing / partial [[dossier:…]] or [[intake:end]] gate.
+      let visible = speakBuf
+        .replace(/\s*\[\[\s*dossier\s*:\s*(yes|no)\s*\]\]\s*$/i, "")
+        .replace(/\s*\[\[\s*intake\s*:\s*end\s*\]\]\s*$/i, "");
+      const hold = visible.search(/\[\[\s*(dossier|intake)/i);
       if (hold >= 0) visible = visible.slice(0, hold);
       const m = visible.match(/^([\s\S]*?[.!?…]+)(\s+|$)/);
       if (!m) break;
@@ -566,28 +593,40 @@ export function createVoice({
       }
       return;
     }
-    const clean = String(finalText || "").trim();
-    const norm = (s) => s.replace(/\s+/g, " ").trim();
+    const stripGates = (s) => String(s || "")
+      .replace(/\s*\[\[\s*dossier\s*:\s*(yes|no)\s*\]\]\s*/gi, " ")
+      .replace(/\s*\[\[\s*intake\s*:\s*end\s*\]\]\s*/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    const clean = stripGates(finalText);
     // Drop any unfinished buffer — finalText is authoritative.
     speakBuf = "";
     if (!clean) {
-      if (!speakPumping && !speakQueue.length) afterSpeak();
+      if (!speakPumping && !speakQueue.length) {
+        setVoicePhase("idle");
+        afterSpeak();
+      }
       return;
     }
-    const a = norm(speakJoined);
-    const b = norm(clean);
+    // Transition out of "thinking" immediately once reply text is ready to speak, even while
+    // the /api/tts fetch is in flight — so Updating dossier never sees voicePhase === "thinking".
+    if (voicePhase === "thinking") setVoicePhase("speaking");
+    const a = stripGates(speakJoined);
+    const b = clean;
     if (!a) {
       enqueueSpeak(clean);
     } else if (b.startsWith(a) && b.length > a.length) {
       enqueueSpeak(b.slice(a.length).trim());
     } else if (a !== b && !a.startsWith(b)) {
-      // Stream text drifted from final reply — restart with the clean answer (avoid silence).
-      const force = speakForce;
-      stopSpeak();
-      speakForce = force;
-      enqueueSpeak(clean);
+      // Only enqueue if nothing is currently playing/queued; never kill active TTS mid-sentence!
+      if (!audioEl && !speakPumping && !speakQueue.length) {
+        enqueueSpeak(clean);
+      }
     }
-    if (!speakPumping && !speakQueue.length) afterSpeak();
+    if (!speakPumping && !speakQueue.length && !audioEl) {
+      setVoicePhase("idle");
+      afterSpeak();
+    }
   }
 
   /**
@@ -633,7 +672,15 @@ export function createVoice({
     return preflightCache;
   }
 
+  async function transcribeWhisper(blob) {
+    const { modelManager } = await import("../../shared/model-manager.js");
+    await modelManager.ensureLoaded("whisper");
+    const audio = await modelManager.decodeAudioBlob(blob);
+    return modelManager.transcribe(audio, getLanguage());
+  }
+
   async function transcribeCloud(blob) {
+    if (sttProvider === "whisper") return transcribeWhisper(blob);
     const fd = new FormData();
     fd.append("audio", blob, "utterance.webm");
     fd.append("language", getLanguage());
@@ -657,45 +704,11 @@ export function createVoice({
     return (data.text || "").trim();
   }
 
-  function watchSilence(stream) {
+  /** Waveform meter only — recording ends via #listenStopBtn (or mic), never silence auto-stop. */
+  function watchRecordingMeter(stream) {
     clearSilenceWatch();
     speechSeen = false;
     startWaveform(stream);
-    let audioCtx;
-    try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512;
-      source.connect(analyser);
-      const data = new Uint8Array(analyser.fftSize);
-      let quietMs = 0;
-      const tickMs = 100;
-      const quietNeed = 1200;
-      const speechThreshold = 0.018;
-      silenceTimer = setInterval(() => {
-        if (!mediaRecorder || mediaRecorder.state !== "recording") return;
-        analyser.getByteTimeDomainData(data);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) {
-          const v = (data[i] - 128) / 128;
-          sum += v * v;
-        }
-        const rms = Math.sqrt(sum / data.length);
-        if (rms > speechThreshold) {
-          speechSeen = true;
-          quietMs = 0;
-        } else if (speechSeen) {
-          quietMs += tickMs;
-          if (quietMs >= quietNeed) stopCloudRecording();
-        }
-      }, tickMs);
-      mediaRecorder?.addEventListener("stop", () => {
-        try { audioCtx.close(); } catch { /* ignore */ }
-      }, { once: true });
-    } catch {
-      /* silence detection optional */
-    }
   }
 
   function stopCloudRecording() {
@@ -757,6 +770,10 @@ export function createVoice({
           }
         } catch (err) {
           clearLiveBubble();
+          if (sttProvider === "whisper") {
+            setVoicePhase("idle", `Whisper failed: ${String(err.message || err).slice(0, 100)}`);
+            return;
+          }
           // Cloud STT failed after record — fall back to browser for next attempt.
           preflightCache = { at: 0, stt: null, use: null, ok: false };
           sttProvider = "browser";
@@ -765,11 +782,11 @@ export function createVoice({
         }
       };
       mediaRecorder.start(250);
-      watchSilence(mediaStream);
-      // Live chat bubble while cloud records (shadow Web Speech; final = /api/stt).
+      watchRecordingMeter(mediaStream);
+      // Live chat bubble while cloud/whisper records (final STT on Stop).
       paintSttPreview("");
       startInterimShadow();
-      setStatus("Listening… (live bubble · Stop = send)");
+      setStatus("Listening… · Stop to send");
     } catch (err) {
       stopMicCapture({ keepPhase: true });
       setVoicePhase("idle", `Microphone: ${String(err.message || err).slice(0, 100)}`);
@@ -789,7 +806,7 @@ export function createVoice({
     activeRecognition = recognition;
     recognition.lang = langTag(getLanguage());
     recognition.interimResults = true;
-    // Continuous until Stop (or silence auto-stop via onend after pause chains).
+    // Continuous until Stop (#listenStopBtn / mic) — no silence auto-send.
     recognition.continuous = true;
     let finalText = "";
     recognition.onstart = () => {
@@ -850,6 +867,25 @@ export function createVoice({
     stopSpeak();
     stopMicCapture({ keepPhase: true });
     sttProvider = resolveSttProvider();
+    // Whisper: MediaRecorder path, no server STT preflight.
+    if (sttProvider === "whisper") {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        sttProvider = "browser";
+        onProviderChange();
+        startBrowserListening();
+        return;
+      }
+      try {
+        const { modelManager } = await import("../../shared/model-manager.js");
+        setVoicePhase("thinking", "Loading Whisper…");
+        await modelManager.ensureLoaded("whisper");
+      } catch (err) {
+        setVoicePhase("idle", `Whisper load failed: ${String(err.message || err).slice(0, 100)}`);
+        return;
+      }
+      await startCloudListening();
+      return;
+    }
     setVoicePhase("thinking", "Checking STT…");
     try {
       const pf = await voicePreflight(sttProvider);
@@ -891,17 +927,21 @@ export function createVoice({
   };
 
   const onMicClick = () => {
-    // Always cut TTS on mic interaction — Speak must not wait on speak().
+    // Always cut TTS on mic interaction — if only speaking (no extract running), just stop audio.
     if (voicePhase === "speaking") {
       stopSpeak();
       clearAwaitingGreeting();
       setVoicePhase("idle");
+      // If dossier extract is NOT running, stopping TTS is all the user wanted.
+      // If extract IS running, fall through so they get the repeat-question warning before recording.
       return;
     }
     if (voicePhase === "listening") {
-      if (sttProvider === "elevenlabs" || sttProvider === "deepgram") stopCloudRecording();
-      else if (activeRecognition) { try { activeRecognition.stop(); } catch { /* ignore */ } }
-      else stopVoice();
+      if (sttProvider === "elevenlabs" || sttProvider === "deepgram" || sttProvider === "whisper") {
+        stopCloudRecording();
+      } else if (activeRecognition) {
+        try { activeRecognition.stop(); } catch { /* ignore */ }
+      } else stopVoice();
       return;
     }
     if (voicePhase === "thinking") {
@@ -927,6 +967,8 @@ export function createVoice({
     getPhase: () => voicePhase,
     setStatus,
     setVoicePhase,
+    setExtractBusy,
+    syncMicLabels,
     sttLabel,
     resolveSttProvider,
     applySttProvider,

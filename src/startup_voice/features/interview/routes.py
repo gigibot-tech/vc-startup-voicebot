@@ -57,6 +57,18 @@ class TurnBody(BaseModel):
     text: str = Field(min_length=1)
 
 
+class CommitTurnBody(BaseModel):
+    """Browser LLM turn: raw reply + raw extract JSON (prompts came from /turn/prepare)."""
+
+    raw_reply: str = Field(min_length=1)
+    raw_extract: str = ""
+    text: str = ""
+
+
+class CommitContinueBody(BaseModel):
+    raw_reply: str = Field(min_length=1)
+
+
 def _sse(event: str, data: dict) -> str:
     """One Server-Sent Event: "event:" + "data:" lines, terminated by a BLANK line."""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -235,6 +247,54 @@ def build_router(
         registry.put(session)
         return {"session": session.model_dump(), "reply": session.spoken_summary}
 
+    @router.post("/api/sessions/{session_id}/turn/prepare")
+    def turn_prepare(session_id: str, body: TurnBody) -> dict:
+        """Browser LLM: record user line + return reply/extract prompts (no server model)."""
+        session = registry.get(session_id)
+        try:
+            payload = pipeline.prepare_client_turn(session, body.text)
+        except Exception as exc:
+            raise HTTPException(502, f"Turn prepare failed: {exc}") from exc
+        registry.put(session)
+        return payload
+
+    @router.post("/api/sessions/{session_id}/turn/reply")
+    def turn_reply(session_id: str, body: CommitContinueBody) -> dict:
+        """Browser LLM: persist the assistant reply immediately after Call #1 (before extract)."""
+        session = registry.get(session_id)
+        try:
+            session, reply, offer_end = pipeline.commit_client_reply(session, body.raw_reply)
+        except Exception as exc:
+            raise HTTPException(502, f"Turn reply commit failed: {exc}") from exc
+        registry.put(session)
+        return {
+            "session": session.model_dump(),
+            "reply": reply,
+            "needs_extract": True,
+            "offer_end": offer_end,
+        }
+
+    @router.post("/api/sessions/{session_id}/turn/commit")
+    def turn_commit(session_id: str, body: CommitTurnBody) -> dict:
+        """Browser LLM: apply raw reply + extract through the same dossier review gate."""
+        session = registry.get(session_id)
+        try:
+            session, reply, offer_end = pipeline.commit_client_turn(
+                session,
+                raw_reply=body.raw_reply,
+                raw_extract=body.raw_extract or "",
+                user_text=body.text or None,
+            )
+        except Exception as exc:
+            raise HTTPException(502, f"Turn commit failed: {exc}") from exc
+        registry.put(session)
+        return {
+            "session": session.model_dump(),
+            "reply": reply,
+            "needs_extract": True,
+            "offer_end": offer_end,
+        }
+
     @router.post("/api/sessions/{session_id}/continue")
     def continue_asking(session_id: str) -> dict:
         """[Weiter fragen] on the end banner - agent asks one more follow-up question."""
@@ -242,6 +302,28 @@ def build_router(
             session, question = pipeline.continue_interview(registry.get(session_id))
         except Exception as exc:
             raise HTTPException(502, f"Continue question failed: {exc}") from exc
+        registry.put(session)
+        return {"session": session.model_dump(), "reply": question}
+
+    @router.post("/api/sessions/{session_id}/continue/prepare")
+    def continue_prepare(session_id: str) -> dict:
+        """Browser LLM: return continue-question prompts (no server model)."""
+        session = registry.get(session_id)
+        try:
+            payload = pipeline.prepare_continue(session)
+        except Exception as exc:
+            raise HTTPException(502, f"Continue prepare failed: {exc}") from exc
+        registry.put(session)
+        return payload
+
+    @router.post("/api/sessions/{session_id}/continue/commit")
+    def continue_commit(session_id: str, body: CommitContinueBody) -> dict:
+        """Browser LLM: persist the continue question text."""
+        session = registry.get(session_id)
+        try:
+            session, question = pipeline.commit_continue(session, body.raw_reply)
+        except Exception as exc:
+            raise HTTPException(502, f"Continue commit failed: {exc}") from exc
         registry.put(session)
         return {"session": session.model_dump(), "reply": question}
 

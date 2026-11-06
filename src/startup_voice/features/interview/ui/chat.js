@@ -33,10 +33,12 @@
 
 import { api, apiStream } from "../../shared/api.js";
 import { esc, fmtTime, fmtTs } from "../../shared/format.js";
+import { modelManager } from "../../shared/model-manager.js";
 import {
   activeId, activeSession, appState, clearProcessBusy, clearTurnError, confirmInterruptProcess,
   isPicker, nav, setLoading, setProcessBusy, setTurnError,
 } from "../../shared/state.js";
+import { prefs } from "../prefs/prefs.js";
 import { t } from "../prefs/chrome-i18n.js";
 
 /**
@@ -174,10 +176,12 @@ export function createChat({ voice, sessions }) {
       ? t("updatingDossier", lang)
       : t("processingReply", lang);
     setProcessBusy({ kind, sessionId, message: message || fallback });
+    voice.setExtractBusy?.(kind === "extract");
   }
 
   function hideProcessBusy() {
     clearProcessBusy();
+    voice.setExtractBusy?.(false);
   }
 
   function isDossierComplete(session) {
@@ -373,9 +377,12 @@ export function createChat({ voice, sessions }) {
     if (!dock.contains(btn)) dock.appendChild(btn);
     if (!dock.contains(bar)) dock.appendChild(bar);
     // … qaList → speakDock → intakeEnd → proposalList …
-    if (intakeEnd) intakeEnd.before(dock);
-    else if (proposals) proposals.before(dock);
-    else qaList.after(dock);
+    if (dock) {
+      if (intakeEnd) intakeEnd.before(dock);
+      else if (proposals) proposals.before(dock);
+      else qaList.after(dock);
+      voice.syncMicLabels?.();
+    }
   }
 
   function renderChat(session) {
@@ -444,6 +451,197 @@ export function createChat({ voice, sessions }) {
    * response is dropped instead of being painted into the wrong chat.
    */
   async function sendText(text, { isRetry = false } = {}) {
+    if (prefs.llm === "transformers") {
+      return sendTextBrowser(text, { isRetry });
+    }
+    return sendTextServer(text, { isRetry });
+  }
+
+  /** Browser Transformers.js path: prepare → worker reply+extract → commit. */
+  async function sendTextBrowser(text, { isRetry = false } = {}) {
+    const trimmed = (text || "").trim();
+    const id = activeId();
+    const session = activeSession();
+    if (isPicker() || !id || !session || !trimmed || nav.turnBusy || appState.loading) return;
+    if (appState.processBusy && !confirmInterruptProcess(session.language || "de")) return;
+    clearTurnError();
+    const seq = nav.seq;
+    if (turnAbort) {
+      try { turnAbort.abort(); } catch { /* ignore */ }
+    }
+    nav.turnBusy = true;
+    ensureTrailingUser(session, trimmed);
+    hideIntakeEnd();
+    appState.turnHint = "Thinking…";
+    setLoading(true, "turn");
+    showProcessBusy("turn", id, t("thinking", session.language || "de"));
+    voice.stopMicCapture({ keepPhase: true });
+    voice.stopSpeak();
+    voice.beginSpeakStream?.();
+    voice.setVoicePhase("thinking");
+    turnAbort = new AbortController();
+    const myAbort = turnAbort;
+    let thinking = showThinkingBubble(appState.turnHint);
+    let unlockedForSpeak = false;
+    let bubble = null;
+    const maybeShowIntakeEnd = (d) => {
+      if (d?.offer_end || isDossierComplete(d?.session)) showIntakeEnd();
+    };
+    const unlockAfterReply = (d) => {
+      if (unlockedForSpeak || nav.isStale(seq, id)) return;
+      unlockedForSpeak = true;
+      appState.turnHint = null;
+      nav.turnBusy = false;
+      if (appState.sessionId === id) setLoading(false);
+      showProcessBusy("extract", id, t("updatingDossier", session.language || "de"));
+      if (d?.session) {
+        sessions.applySessionToList(d.session);
+        sessions.patchActiveSession(d.session);
+      }
+      if (bubble && d?.reply) bubble.textContent = d.reply;
+      maybeShowIntakeEnd(d);
+      if (typeof voice.endSpeakStream === "function") voice.endSpeakStream(d.reply || "");
+      else void voice.speak(d.reply || "");
+    };
+    try {
+      await modelManager.ensureLoaded("llm");
+      if (myAbort.signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const prepared = await api(`/api/sessions/${id}/turn/prepare`, {
+        method: "POST",
+        body: JSON.stringify({ text: trimmed }),
+        signal: myAbort.signal,
+      });
+      if (nav.isStale(seq, id)) return;
+      // Do NOT patchActiveSession(prepared.session) here — prepared.session only has the user
+      // line and would trigger renderChat(), wiping the live thinking/streaming bubble!
+      if (prepared?.session) {
+        sessions.applySessionToList(prepared.session);
+      }
+      const stripMarks = (raw) => (raw || "")
+        .replace(/\n?\s*\[\[\s*dossier\s*:\s*(yes|no)\s*\]\]\s*$/i, "")
+        .replace(/\n?\s*\[\[\s*intake\s*:\s*end\s*\]\]\s*$/i, "")
+        .trim();
+      let streamed = "";
+      let committedAfterReply = false;
+      const { raw_reply, raw_extract } = await modelManager.runTurn(prepared, {
+        onReplyDelta: (chunk) => {
+          if (nav.isStale(seq, id) || myAbort.signal.aborted) return;
+          streamed += chunk;
+          voice.pushSpeakStream?.(chunk);
+          if (!bubble) {
+            appState.turnHint = null;
+            bubble = promoteThinking(thinking, streamed);
+            thinking = null;
+          } else if (!unlockedForSpeak) {
+            bubble.textContent = streamed;
+          }
+          chatScroll.scrollTop = chatScroll.scrollHeight;
+        },
+        onReplyDone: async (replyRaw) => {
+          if (nav.isStale(seq, id) || myAbort.signal.aborted) return;
+          const fullRaw = (replyRaw || streamed).trim();
+          const spoken = stripMarks(fullRaw) || fullRaw;
+          if (!bubble && thinking) {
+            bubble = promoteThinking(thinking, spoken);
+            thinking = null;
+          } else if (bubble) {
+            bubble.textContent = spoken;
+          }
+          // Persist the assistant reply on disk BEFORE Call #2 (extract) starts, so
+          // refreshing or slow extract never leaves the user message unanswered.
+          let replySaved = null;
+          if (fullRaw) {
+            try {
+              replySaved = await api(`/api/sessions/${id}/turn/reply`, {
+                method: "POST",
+                body: JSON.stringify({ raw_reply: fullRaw }),
+                signal: myAbort.signal,
+              });
+            } catch {
+              /* commit will still save if this failed */
+            }
+          }
+          unlockAfterReply({
+            reply: replySaved?.reply || spoken,
+            needs_extract: true,
+            session: replySaved?.session,
+            offer_end: replySaved?.offer_end,
+          });
+          showProcessBusy("extract", id, t("updatingDossier", session.language || "de"));
+          if (voice.getPhase() !== "speaking") {
+            voice.setStatus(t("updatingDossier", session.language || "de"));
+          }
+        },
+        onPhase: (phase) => {
+          if (phase === "extract") {
+            showProcessBusy("extract", id, t("updatingDossier", session.language || "de"));
+            if (voice.getPhase() !== "speaking") {
+              voice.setStatus(t("updatingDossier", session.language || "de"));
+            }
+          }
+        },
+      });
+      if (myAbort.signal.aborted) throw new DOMException("Aborted", "AbortError");
+      const spokenReply = stripMarks(raw_reply) || raw_reply;
+      if (!unlockedForSpeak) {
+        if (!bubble && thinking) {
+          bubble = promoteThinking(thinking, spokenReply);
+          thinking = null;
+        } else if (bubble) {
+          bubble.textContent = spokenReply;
+        }
+        unlockAfterReply({ reply: spokenReply, needs_extract: true });
+      }
+      void committedAfterReply;
+      const data = await api(`/api/sessions/${id}/turn/commit`, {
+        method: "POST",
+        body: JSON.stringify({
+          raw_reply,
+          raw_extract,
+          text: trimmed,
+        }),
+        signal: myAbort.signal,
+      });
+      if (nav.isStale(seq, id)) return;
+      clearTurnError();
+      sessions.applySessionToList(data.session);
+      sessions.patchActiveSession(data.session);
+      void sessions.refreshPicker();
+      if (bubble && data?.session) syncBubbleWarning(bubble, data.session);
+      maybeShowIntakeEnd(data);
+      syncIntakeEnd(data.session);
+      hideProcessBusy();
+    } catch (err) {
+      removeThinking(thinking);
+      hideProcessBusy();
+      if (turnAbort !== myAbort && turnAbort !== null) return;
+      if (!nav.isStale(seq, id)) {
+        const aborted = err?.name === "AbortError"
+          || /aborted|aborterror/i.test(String(err?.message || err));
+        const message = aborted
+          ? "Reply interrupted"
+          : String(err.message || err).slice(0, 140);
+        voice.setVoicePhase("idle", message);
+        ensureTrailingUser(session, trimmed);
+        setTurnError({ sessionId: id, text: trimmed, message });
+      }
+    } finally {
+      if (turnAbort === myAbort) {
+        turnAbort = null;
+        appState.turnHint = null;
+        if (!unlockedForSpeak) {
+          nav.turnBusy = false;
+          if (appState.sessionId === id) setLoading(false);
+          if (voice.getPhase() === "thinking" && appState.sessionId === id) {
+            voice.setVoicePhase("idle");
+          }
+        }
+        if (appState.processBusy?.sessionId === id) hideProcessBusy();
+      }
+    }
+  }
+
+  async function sendTextServer(text, { isRetry = false } = {}) {
     const trimmed = (text || "").trim();
     const id = activeId();
     const session = activeSession();
@@ -480,7 +678,7 @@ export function createChat({ voice, sessions }) {
       if (hint) {
         hint.hidden = false;
         hint.dataset.live = "1";
-        hint.textContent = `${msg} · Speak anytime`;
+        hint.textContent = msg;
       }
       voice.setStatus(msg);
       if (thinking) setThinkingLabel(thinking, msg);
@@ -537,7 +735,8 @@ export function createChat({ voice, sessions }) {
             if (d.phase === "extract") {
               const msg = d.message || t("updatingDossier", session.language || "de");
               showProcessBusy("extract", id, msg);
-              voice.setStatus(msg);
+              // Do NOT overwrite voiceStatus if TTS is currently speaking!
+              if (voice.getPhase() !== "speaking") voice.setStatus(msg);
               return;
             }
             // Reply phase: keep Thinking… until tokens promote the bubble.
@@ -642,7 +841,25 @@ export function createChat({ voice, sessions }) {
     voice.setVoicePhase("thinking");
     const thinking = showThinkingBubble(appState.turnHint);
     try {
-      const data = await api(`/api/sessions/${id}/continue`, { method: "POST", body: "{}" });
+      let data;
+      if (prefs.llm === "transformers") {
+        await modelManager.ensureLoaded("llm");
+        const prepared = await api(`/api/sessions/${id}/continue/prepare`, {
+          method: "POST",
+          body: "{}",
+        });
+        const raw_reply = await modelManager.generateOnce(
+          prepared.reply_system,
+          prepared.reply_user,
+          prepared.reply_max_tokens || 400,
+        );
+        data = await api(`/api/sessions/${id}/continue/commit`, {
+          method: "POST",
+          body: JSON.stringify({ raw_reply }),
+        });
+      } else {
+        data = await api(`/api/sessions/${id}/continue`, { method: "POST", body: "{}" });
+      }
       if (nav.isStale(seq, id)) return;
       removeThinking(thinking);
       if (data?.session) {

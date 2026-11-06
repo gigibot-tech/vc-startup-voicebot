@@ -31,14 +31,28 @@ module documents which button triggers which backend flow.
 
 | Mode | Transport | Notes |
 |------|-----------|-------|
-| **Shipped** | **ElevenLabs STT** (Scribe, same API key) / Deepgram / Web Speech + **ElevenLabs TTS** | Mic → `/api/stt?provider=` → turn; TTS with tonality (stability/similarity/style/speed) |
+| **Shipped** | **ElevenLabs STT** (Scribe, same API key) / **Whisper (Transformers.js)** / Deepgram / Web Speech + **ElevenLabs TTS** | Mic → cloud `/api/stt` or in-browser Whisper → turn; TTS with tonality (stability/similarity/style/speed) |
 | Bridge only | PersonaPlex helpers in `features/voice/bridge.py` | `/personaplex-config` + tool-webhook exist; **no LiveKit/GPU client in UI** — missing mode is not a `.env` gap |
 | Planned | LiveKit agent process | Needs GPU PersonaPlex server + room join |
+
+## Browser WebGPU (Transformers.js)
+
+Settings (`#prefsBar`):
+- **STT** `#sttSel`: `elevenlabs` | `whisper` | `deepgram` | `browser`
+- **LLM** `#llmSel`: `ollama` (server, default) | `transformers` (browser WebGPU)
+
+When `llm=transformers`, chat uses the same loaded `text-generation` pipeline for Call #1 (spoken reply) and Call #2 (5-slot JSON extract):
+
+1. `POST /api/sessions/{id}/turn/prepare` → `{reply_system, reply_user, extract_system, extract_user, …}`
+2. Worker runs reply (streamed) then extract on `onnx-community/Qwen2.5-1.5B-Instruct` (`q4f16`)
+3. `POST /api/sessions/{id}/turn/commit` `{raw_reply, raw_extract}` → same review/score gate as server turns
+
+Whisper STT uses `onnx-community/whisper-base` via the shared worker + reusable `ModelStatusCard` (`static/shared/model-manager.js`, `transformers-worker.js` on `@huggingface/transformers@4`). Download progress syncs to `#processBanner`. Whisper is the default STT fallback when no cloud keys are configured. Continue-asking has matching `/continue/prepare` + `/continue/commit`.
 
 ### Voice UX
 - Phases: **listening → thinking → speaking → idle** (orb + status). Sending a turn clears listening/speaking immediately so UI does not stick on “Speaking…/Listening…”.
 - Listening dock: ChatGPT-style **waveform + Stop** (`#listenBar`); **live transcript** is a provisional user chat bubble (`paintSttPreview` → `.team-qa--live`), not the composer.
-- Deepgram: click mic to record; auto-stop on short silence, or click again to send. Fallback: Web Speech when no API key.
+- Cloud / Whisper: click mic to record; **Stop** (`#listenStopBtn`) ends the utterance and sends (mic click also stops). No silence auto-stop. Fallback: Web Speech when no API key.
 - **UI chrome is English**; interview speech language stays DE/EN via `#langSel`.
 
 UI session picker loads `GET /api/sessions` and resumes `session.json` from disk.
