@@ -51,126 +51,165 @@
     </header>
 
     <div class="prefs-bar" id="prefsBar">
-      <div class="prefs-group" aria-label="Voice mode">
-        <span class="prefs-group-label">Voice mode</span>
-        <label class="setting setting-row"><span>Mode</span>
-          <select id="voiceModeSel" aria-label="Voice mode">
-            <option value="classic">Classic (push-to-talk)</option>
-            <option value="livekit">LiveKit (hands-free)</option>
-          </select>
+      <!-- Plain-language settings for founders. Technical engines live in the "Technik" fold;
+           every control keeps its id, settings.js wires them (voiceModeSel is driven by the cards). -->
+      <section class="prefs-card" aria-labelledby="prefsTalkTitle">
+        <h3 class="prefs-card__title" id="prefsTalkTitle" data-i18n="prefsTalkTitle">Wie möchtest du sprechen?</h3>
+        <div class="mode-cards" role="radiogroup" aria-labelledby="prefsTalkTitle">
+          <button type="button" class="mode-card" role="radio" data-mode="classic" aria-checked="true">
+            <span class="mode-card__icon" aria-hidden="true">🎙️</span>
+            <span class="mode-card__text">
+              <strong data-i18n="modeClassicTitle">Antippen &amp; sprechen</strong>
+              <span data-i18n="modeClassicDesc">Tippe auf „Sprechen“, erzähl, tippe auf „Stopp“. Wie eine Sprachnachricht.</span>
+            </span>
+          </button>
+          <button type="button" class="mode-card" role="radio" data-mode="livekit" aria-checked="false">
+            <span class="mode-card__icon" aria-hidden="true">📞</span>
+            <span class="mode-card__text">
+              <strong data-i18n="modeLiveTitle">Freies Gespräch</strong>
+              <span data-i18n="modeLiveDesc">Wie ein Telefonat: einfach reden, jederzeit unterbrechen.</span>
+              <em class="mode-card__badge" id="modeLiveBadge" hidden data-i18n="modeNotSetUp">Noch nicht eingerichtet</em>
+            </span>
+          </button>
+        </div>
+        <select id="voiceModeSel" class="visually-hidden" aria-hidden="true" tabindex="-1">
+          <option value="classic">classic</option>
+          <option value="livekit">livekit</option>
+        </select>
+        <label class="switch-row">
+          <input type="checkbox" id="autoListen" role="switch" />
+          <span class="switch" aria-hidden="true"></span>
+          <span class="switch-row__text">
+            <strong data-i18n="autoListenTitle">Nach der Antwort gleich weiter zuhören</strong>
+            <span data-i18n="autoListenDesc">Du musst nicht jedes Mal neu auf „Sprechen“ tippen.</span>
+          </span>
         </label>
-        <p class="prefs-hint" id="voiceModeHint">Classic: press Sprechen, talk, press Stopp. LiveKit: one press starts a hands-free call — just talk, interrupt any time; needs the voice worker (see README). With STT = Whisper (Browser) the browser listens in a call and the worker only speaks.</p>
-      </div>
-      <div class="prefs-group" aria-label="Speech recognition">
-        <span class="prefs-group-label">Speech recognition</span>
-        <label class="setting setting-row"><span>STT</span>
-          <select id="sttSel" aria-label="Speech recognition">
-            <option value="elevenlabs">ElevenLabs</option>
-            <option value="whisper">Whisper (Browser)</option>
-            <option value="deepgram">Deepgram</option>
-            <option value="browser">Web Speech</option>
-          </select>
+        <p class="prefs-note" data-i18n="langNote">Die Sprache (Deutsch / Englisch) stellst du oben rechts ein.</p>
+      </section>
+
+      <section class="prefs-card" aria-labelledby="prefsVoiceTitle">
+        <h3 class="prefs-card__title" id="prefsVoiceTitle" data-i18n="prefsVoiceTitle">Stimme &amp; Dossier</h3>
+        <label class="switch-row">
+          <input type="checkbox" id="voiceOn" role="switch" checked />
+          <span class="switch" aria-hidden="true"></span>
+          <span class="switch-row__text">
+            <strong data-i18n="voiceOnTitle">Antworten laut vorlesen</strong>
+            <span data-i18n="voiceOnDesc">Aus = du liest die Antworten nur im Chat.</span>
+          </span>
         </label>
-        <div id="whisperModelSlot" class="model-card-slot" hidden></div>
-        <p class="prefs-hint">Interview language (DE/EN) is in the header — applies to the open session and new ones.</p>
-      </div>
-      <div class="prefs-group" aria-label="Reply model">
-        <span class="prefs-group-label">Reply model</span>
-        <label class="setting setting-row"><span>LLM</span>
-          <select id="llmSel" aria-label="Reply model">
-            <option value="ollama">Ollama (Server · Granite 4.2 8B)</option>
-            <option value="granite-3b">Granite 4 · 3B (Browser WebGPU)</option>
-            <option value="gemma-3n-e2b">Gemma 3n · E2B Nano (Browser WebGPU)</option>
-          </select>
-        </label>
-        <div id="llmModelSlot" class="model-card-slot" hidden></div>
-        <p class="prefs-hint">Browser WebGPU runs reply + 5-slot extract on the same loaded model (switching back to Ollama unloads RAM automatically).</p>
-      </div>
-      <div class="prefs-group" aria-label="Speech output">
-        <span class="prefs-group-label">Speech output</span>
-        <label class="setting setting-row"><span>Read replies aloud</span><input type="checkbox" id="voiceOn" checked /></label>
-        <label class="setting setting-row"><span>TTS</span>
-          <select id="ttsSel" aria-label="Text to speech">
-            <option value="local" selected>Browser TTS (download, default)</option>
-            <option value="browser">Web Speech</option>
-            <option value="elevenlabs">ElevenLabs</option>
-          </select>
-        </label>
-        <div id="ttsModelSlot" class="model-card-slot" hidden></div>
-        <p class="prefs-hint">Default is a small on-device TTS model (MMS DE/EN). Web Speech and ElevenLabs stay available as fallbacks.</p>
         <fieldset class="voice-deps" id="voiceDeps">
-          <label class="setting setting-row"><span>Speed</span>
-            <select id="voiceSpeedSel" aria-label="Speech rate">
-              <option value="0.75">0.75×</option>
-              <option value="0.9">0.9×</option>
-              <option value="1" selected>1×</option>
-              <option value="1.1">1.1×</option>
-              <option value="1.2">1.2×</option>
+          <label class="pick-row"><span data-i18n="speedLabel">Sprechtempo</span>
+            <select id="voiceSpeedSel" data-i18n-aria="speedLabel" aria-label="Sprechtempo">
+              <option value="0.75" data-i18n="speedSlow">Langsam</option>
+              <option value="0.9" data-i18n="speedSlower">Etwas langsamer</option>
+              <option value="1" selected data-i18n="speedNormal">Normal</option>
+              <option value="1.1" data-i18n="speedFaster">Etwas schneller</option>
+              <option value="1.2" data-i18n="speedFast">Schnell</option>
             </select>
           </label>
-          <label class="setting setting-row" title="Stability — higher = calmer">
-            <span>Stability</span>
-            <input type="range" id="stabilityRange" min="0" max="100" value="45" />
-            <span class="range-val" id="stabilityVal">0.45</span>
-          </label>
-          <label class="setting setting-row" title="Similarity to the voice">
-            <span>Similarity</span>
-            <input type="range" id="similarityRange" min="0" max="100" value="75" />
-            <span class="range-val" id="similarityVal">0.75</span>
-          </label>
-          <label class="setting setting-row" title="Keep listening after the reply">
-            <span>Keep listening</span><input type="checkbox" id="autoListen" />
-          </label>
         </fieldset>
-      </div>
-      <div class="prefs-group" aria-label="Conflicts">
-        <span class="prefs-group-label">Conflicts</span>
-        <label class="setting setting-row" title="Auto-accept incoming when confidence is at least this (Off = always manual)">
-          <span>Auto-resolve if confidence ≥</span>
-          <select id="autoResolveMinSel" aria-label="Auto-resolve confidence threshold">
-            <option value="0.5">50%</option>
-            <option value="0.7">70%</option>
-            <option value="0.75" selected>75%</option>
-            <option value="0.85">85%</option>
-            <option value="0.95">95%</option>
-            <option value="1.01">Off</option>
+        <label class="pick-row" data-i18n-title="autoResolveHelp" title="">
+          <span data-i18n="autoResolveLabel">Dossier-Änderungen automatisch übernehmen</span>
+          <select id="autoResolveMinSel" data-i18n-aria="autoResolveLabel" aria-label="Dossier-Änderungen automatisch übernehmen">
+            <option value="0.5" data-i18n="autoResolve50">Fast immer</option>
+            <option value="0.7" data-i18n="autoResolve70">Wenn ziemlich sicher</option>
+            <option value="0.75" selected data-i18n="autoResolve75">Wenn sicher (empfohlen)</option>
+            <option value="0.85" data-i18n="autoResolve85">Nur wenn sehr sicher</option>
+            <option value="0.95" data-i18n="autoResolve95">Nur wenn fast eindeutig</option>
+            <option value="1.01" data-i18n="autoResolveOff">Nie – ich prüfe alles selbst</option>
           </select>
         </label>
-        <p class="prefs-hint">High-confidence incoming values apply automatically; the rest stay as merge conflicts. History is expandable under the conflict list.</p>
-      </div>
-      <details class="fold prefs-prompt" id="systemPromptPanel">
-        <summary>System prompt</summary>
-        <p class="prefs-hint">Controls interview style (replies). Greeting = first line of new chats.</p>
-        <label class="setting">
-          <span>Greeting</span>
-          <textarea id="greetingInput" rows="2" spellcheck="true"></textarea>
-        </label>
-        <label class="setting">
-          <span>Follow-up on gaps / vague answers</span>
-          <select id="followupModeSelect" aria-label="Follow-up intensity">
-            <option value="balanced" selected>Balanced — breadth first, then depth</option>
-            <option value="insist">Insistent — demand concrete evidence</option>
-            <option value="strict">Strict — probe every vague field</option>
-          </select>
-        </label>
-        <p class="prefs-hint">Affects the next question: how hard to dig when slots are not solid.</p>
-        <label class="setting">
-          <span>Dossier extract mode (speed vs full context)</span>
-          <select id="extractModeSelect" aria-label="Dossier extract mode">
-            <option value="full" selected>Full transcript context (Default)</option>
-            <option value="delta">Fast delta only — only new/changed fields</option>
-          </select>
-        </label>
-        <p class="prefs-hint">Default sends the recent transcript to Call #2; Fast delta sends only the last question + latest answer to compare extraction speed.</p>
-        <label class="setting">
-          <span>System prompt (replies)</span>
-          <textarea id="systemPromptInput" rows="6" spellcheck="true"></textarea>
-        </label>
-        <div class="prefs-prompt-actions">
-          <button class="pill" type="button" id="savePromptBtn">Save prompt</button>
-          <button class="pill-outline" type="button" id="resetPromptBtn">Defaults</button>
-          <span class="prefs-save-status" id="promptSaveStatus" aria-live="polite"></span>
+        <p class="prefs-note" data-i18n="autoResolveNote">Wenn sich die KI unsicher ist, fragt sie dich, bevor sie etwas im Dossier ändert.</p>
+      </section>
+
+      <details class="fold prefs-tech" id="prefsTech">
+        <summary><span data-i18n="techTitle">Technik &amp; Feintuning</span><small data-i18n="techSub">Für dein Tech-Team – musst du nicht anfassen</small></summary>
+        <div class="prefs-tech__grid">
+          <div class="prefs-group" aria-label="Voice mode">
+            <span class="prefs-group-label">Voice mode</span>
+            <p class="prefs-hint" id="voiceModeHint">Classic = push-to-talk in the browser. LiveKit = hands-free WebRTC call with the voice worker (README). With STT = Whisper (Browser) the browser listens in a call and the worker only speaks.</p>
+            <p class="prefs-hint prefs-hint--warn" id="voiceModeTech" hidden></p>
+          </div>
+          <div class="prefs-group" aria-label="Speech recognition">
+            <span class="prefs-group-label">Speech recognition</span>
+            <label class="setting setting-row"><span>STT</span>
+              <select id="sttSel" aria-label="Speech recognition">
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="whisper">Whisper (Browser)</option>
+                <option value="deepgram">Deepgram</option>
+                <option value="browser">Web Speech</option>
+              </select>
+            </label>
+            <div id="whisperModelSlot" class="model-card-slot" hidden></div>
+          </div>
+          <div class="prefs-group" aria-label="Reply model">
+            <span class="prefs-group-label">Reply model</span>
+            <label class="setting setting-row"><span>LLM</span>
+              <select id="llmSel" aria-label="Reply model">
+                <option value="ollama">Ollama (Server · Granite 4.2 8B)</option>
+                <option value="granite-3b">Granite 4 · 3B (Browser WebGPU)</option>
+                <option value="gemma-3n-e2b">Gemma 3n · E2B Nano (Browser WebGPU)</option>
+              </select>
+            </label>
+            <div id="llmModelSlot" class="model-card-slot" hidden></div>
+            <p class="prefs-hint">Browser WebGPU runs reply + 5-slot extract on the same loaded model (switching back to Ollama unloads RAM).</p>
+          </div>
+          <div class="prefs-group" aria-label="Speech output">
+            <span class="prefs-group-label">Speech output</span>
+            <label class="setting setting-row"><span>TTS</span>
+              <select id="ttsSel" aria-label="Text to speech">
+                <option value="local" selected>Browser TTS (download, default)</option>
+                <option value="browser">Web Speech</option>
+                <option value="elevenlabs">ElevenLabs</option>
+              </select>
+            </label>
+            <div id="ttsModelSlot" class="model-card-slot" hidden></div>
+            <label class="setting setting-row" title="Stability — higher = calmer">
+              <span>Stability</span>
+              <input type="range" id="stabilityRange" min="0" max="100" value="45" />
+              <span class="range-val" id="stabilityVal">0.45</span>
+            </label>
+            <label class="setting setting-row" title="Similarity to the voice">
+              <span>Similarity</span>
+              <input type="range" id="similarityRange" min="0" max="100" value="75" />
+              <span class="range-val" id="similarityVal">0.75</span>
+            </label>
+          </div>
         </div>
+          <details class="fold prefs-prompt" id="systemPromptPanel">
+            <summary>System prompt</summary>
+            <p class="prefs-hint">Controls interview style (replies). Greeting = first line of new chats.</p>
+            <label class="setting">
+              <span>Greeting</span>
+              <textarea id="greetingInput" rows="2" spellcheck="true"></textarea>
+            </label>
+            <label class="setting">
+              <span>Follow-up on gaps / vague answers</span>
+              <select id="followupModeSelect" aria-label="Follow-up intensity">
+                <option value="balanced" selected>Balanced — breadth first, then depth</option>
+                <option value="insist">Insistent — demand concrete evidence</option>
+                <option value="strict">Strict — probe every vague field</option>
+              </select>
+            </label>
+            <p class="prefs-hint">Affects the next question: how hard to dig when slots are not solid.</p>
+            <label class="setting">
+              <span>Dossier extract mode (speed vs full context)</span>
+              <select id="extractModeSelect" aria-label="Dossier extract mode">
+                <option value="full" selected>Full transcript context (Default)</option>
+                <option value="delta">Fast delta only — only new/changed fields</option>
+              </select>
+            </label>
+            <p class="prefs-hint">Default sends the recent transcript to Call #2; Fast delta sends only the last question + latest answer to compare extraction speed.</p>
+            <label class="setting">
+              <span>System prompt (replies)</span>
+              <textarea id="systemPromptInput" rows="6" spellcheck="true"></textarea>
+            </label>
+            <div class="prefs-prompt-actions">
+              <button class="pill" type="button" id="savePromptBtn">Save prompt</button>
+              <button class="pill-outline" type="button" id="resetPromptBtn">Defaults</button>
+              <span class="prefs-save-status" id="promptSaveStatus" aria-live="polite"></span>
+            </div>
+          </details>
       </details>
     </div>
 

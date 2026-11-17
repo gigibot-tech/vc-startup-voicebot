@@ -214,10 +214,79 @@ button, select, input { font: inherit; color: inherit; }
   background: color-mix(in srgb, var(--vi-berry) 8%, var(--vi-base));
 }
 
+/* Settings panel: two plain-language cards for founders + a closed "Technik" fold. */
 .prefs-bar {
-  display: flex; flex-wrap: wrap; gap: 0.85rem 1.5rem; align-items: flex-start;
-  padding: 0.65rem 1.25rem; border-bottom: 1px solid var(--vi-border);
-  background: var(--vi-accent-2); font-size: 0.78rem;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem;
+  padding: 1rem 1.25rem 1.1rem; border-bottom: 1px solid var(--vi-border);
+  background: var(--vi-accent-2); font-size: 0.9rem; align-items: start;
+}
+.prefs-card {
+  min-width: 0;
+  display: flex; flex-direction: column; gap: 0.8rem; padding: 1rem 1.1rem;
+  border: 1px solid var(--vi-border); border-radius: 1rem; background: var(--vi-base);
+}
+.prefs-card__title { margin: 0; font-size: 1.02rem; font-weight: 700; letter-spacing: -0.01em; }
+.prefs-note { margin: 0; font-size: 0.8rem; opacity: 0.7; line-height: 1.45; }
+
+.mode-cards { display: grid; grid-template-columns: 1fr; gap: 0.55rem; }
+.mode-card {
+  display: flex; gap: 0.75rem; align-items: center; text-align: left; cursor: pointer; min-width: 0;
+  padding: 0.8rem 0.85rem; border-radius: 0.85rem; font: inherit; color: inherit;
+  border: 1.5px solid var(--vi-border); background: var(--vi-fond);
+  transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+.mode-card:hover { border-color: color-mix(in srgb, var(--vi-berry) 55%, var(--vi-border)); }
+.mode-card:focus-visible { outline: 3px solid var(--vi-outline); outline-offset: 2px; }
+.mode-card[aria-checked="true"] {
+  border-color: var(--vi-berry);
+  background: color-mix(in srgb, var(--vi-berry) 9%, var(--vi-base));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--vi-berry) 16%, transparent);
+}
+.mode-card.is-unavailable { cursor: not-allowed; opacity: 0.6; }
+.mode-card.is-unavailable:hover { border-color: var(--vi-border); }
+.mode-card__icon { font-size: 1.5rem; line-height: 1; flex: none; }
+.mode-card__text { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+.mode-card__text strong { font-size: 0.95rem; }
+.mode-card__text span { font-size: 0.8rem; opacity: 0.75; line-height: 1.4; }
+.mode-card__badge {
+  align-self: flex-start; margin-top: 0.15rem; font-style: normal; font-size: 0.72rem; font-weight: 600;
+  padding: 0.15rem 0.5rem; border-radius: 9999px; background: var(--vi-grey); color: var(--vi-contrast);
+}
+
+/* Toggle switch built on a real checkbox (keeps id + change events for settings.js). */
+.switch-row { display: flex; gap: 0.75rem; align-items: flex-start; cursor: pointer; position: relative; }
+.switch-row input { position: absolute; opacity: 0; width: 2.6rem; height: 1.5rem; margin: 0; cursor: pointer; }
+.switch {
+  flex: none; width: 2.6rem; height: 1.5rem; border-radius: 9999px; position: relative;
+  background: var(--vi-grey); transition: background 0.15s ease;
+}
+.switch::after {
+  content: ""; position: absolute; top: 0.15rem; left: 0.15rem; width: 1.2rem; height: 1.2rem;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s ease;
+}
+.switch-row input:checked + .switch { background: var(--vi-berry); }
+.switch-row input:checked + .switch::after { transform: translateX(1.1rem); }
+.switch-row input:focus-visible + .switch { outline: 3px solid var(--vi-outline); outline-offset: 2px; }
+.switch-row__text { display: flex; flex-direction: column; gap: 0.15rem; }
+.switch-row__text strong { font-size: 0.92rem; }
+.switch-row__text span { font-size: 0.8rem; opacity: 0.7; }
+
+.pick-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 0.75rem; font-weight: 600; }
+.pick-row select {
+  font: inherit; font-weight: 500; padding: 0.45rem 0.65rem; border-radius: 0.6rem;
+  border: 1px solid var(--vi-border); background: var(--vi-base); color: inherit; min-width: 11rem;
+}
+
+.prefs-tech { grid-column: 1 / -1; }
+.prefs-tech > summary { flex-wrap: wrap; }
+.prefs-tech > summary small { font-weight: 400; opacity: 0.6; font-size: 0.78rem; margin-right: auto; margin-left: 0.6rem; }
+.prefs-tech__grid { display: flex; flex-wrap: wrap; gap: 0.85rem 1.5rem; align-items: flex-start; font-size: 0.78rem; }
+.prefs-tech .prefs-prompt { margin-top: 0.85rem; font-size: 0.78rem; }
+.prefs-hint--warn { color: var(--vi-berry); opacity: 0.9; }
+.visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 .prefs-group {
   display: flex; flex-wrap: wrap; gap: 0.55rem 0.85rem; align-items: center;
@@ -1115,3 +1184,4 @@ ins.diff-ins { background: color-mix(in srgb, var(--diff-ins-fg) 28%, transparen
   from { opacity: 0; transform: translateY(0.35rem) scale(0.96); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+.voice-deps .pick-row { width: 100%; }

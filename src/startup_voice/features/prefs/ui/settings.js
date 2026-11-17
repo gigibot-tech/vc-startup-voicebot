@@ -79,7 +79,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
   function syncVoiceDeps() {
     const deps = $("voiceDeps");
     deps.disabled = !prefs.voice;
-    deps.title = prefs.voice ? "" : "Only with “Read replies aloud”";
+    deps.title = prefs.voice ? "" : "Nur mit „Antworten laut vorlesen“ / only with “Read replies aloud”";
   }
 
   function releaseIfActive(slotKey) {
@@ -213,26 +213,42 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     applyLayout();
   }
 
-  /** Voice mode dropdown: offer only what the server says is configured, explain what is not. */
+  /**
+   * Voice mode = the two big cards ("Antippen & sprechen" / "Freies Gespräch"). The hidden
+   * #voiceModeSel mirrors them. A mode the server has not configured shows a friendly badge;
+   * the technical reason (missing LIVEKIT_* …) goes to the Technik fold, not in the founder's face.
+   */
   async function syncVoiceModeUi() {
-    const sel = $("voiceModeSel");
-    if (!sel) return;
     let transports = [];
     try { transports = (await api("/api/voice/transports")).transports || []; } catch { /* offline: classic only */ }
-    const reasons = [];
-    for (const opt of sel.options) {
-      const info = transports.find((x) => x.name === opt.value);
-      const ok = opt.value === "classic" || voice.isAvailable(opt.value);
-      opt.disabled = !ok;
-      opt.title = ok ? "" : (info?.reason || "not available");
-      if (!ok) reasons.push(`${opt.textContent.split(" (")[0]}: ${info?.reason || "not available"}`);
+    const current = voice.getMode();
+    const sel = $("voiceModeSel");
+    if (sel) sel.value = current;
+    const tech = [];
+    document.querySelectorAll(".mode-card[data-mode]").forEach((card) => {
+      const mode = card.dataset.mode;
+      const ok = mode === "classic" || voice.isAvailable(mode);
+      card.setAttribute("aria-checked", String(mode === current));
+      card.setAttribute("aria-disabled", String(!ok));
+      card.classList.toggle("is-unavailable", !ok);
+      if (!ok) tech.push(`${mode}: ${transports.find((x) => x.name === mode)?.reason || "not available"}`);
+    });
+    const badge = $("modeLiveBadge");
+    if (badge) badge.hidden = voice.isAvailable("livekit");
+    const techEl = $("voiceModeTech");
+    if (techEl) {
+      techEl.hidden = !tech.length;
+      techEl.textContent = tech.length ? `Unavailable — ${tech.join(" · ")}` : "";
     }
-    sel.value = voice.getMode();
-    const hint = $("voiceModeHint");
-    if (hint) hint.dataset.unavailable = reasons.join(" · ");
-    if (hint && reasons.length) {
-      hint.textContent = `${hint.textContent.split(" — unavailable:")[0]} — unavailable: ${reasons.join(" · ")}`;
-    }
+  }
+
+  function chooseVoiceMode(mode) {
+    if (mode !== "classic" && !voice.isAvailable(mode)) return; // "Noch nicht eingerichtet"
+    prefs.voiceMode = mode;
+    savePrefs();
+    voice.refresh(); // ends a running call, hands over to the other driver
+    void syncVoiceModeUi();
+    onMetaChange?.();
   }
 
   function bindPref(id, event, read, key, after) {
@@ -264,10 +280,19 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
         onMetaChange?.();
       }
     });
-    bindPref("voiceModeSel", "change", (e) => e.value, "voiceMode", () => {
-      voice.refresh(); // ends a running call, hands over to the other driver
-      void syncVoiceModeUi();
-      onMetaChange?.();
+    document.querySelectorAll(".mode-card[data-mode]").forEach((card) => {
+      card.addEventListener("click", () => chooseVoiceMode(card.dataset.mode));
+    });
+    // Arrow keys move between the two cards (radiogroup behaviour).
+    document.querySelector(".mode-cards")?.addEventListener("keydown", (e) => {
+      if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key)) return;
+      const cards = [...document.querySelectorAll(".mode-card[data-mode]")];
+      const i = cards.indexOf(document.activeElement);
+      if (i < 0) return;
+      e.preventDefault();
+      const next = cards[(i + (e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 1) + cards.length) % cards.length];
+      next.focus();
+      chooseVoiceMode(next.dataset.mode);
     });
     bindPref("sttSel", "change", (e) => e.value, "stt", () => {
       voice.applySttProvider();
