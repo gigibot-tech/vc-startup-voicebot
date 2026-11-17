@@ -9,6 +9,7 @@
  */
 
 import { esc, fmtTs } from "../../shared/format.js";
+import { appState } from "../../shared/state.js";
 import { fieldDisplayLabel, schema, slotBadgeLabel, slotBadgeTitle } from "./dossier-schema.js";
 
 /** Below this field-fill %, "Dossier abschließen" asks for a stronger confirmation. */
@@ -132,6 +133,46 @@ function appOfferEnd() {
   return document.getElementById("app")?.dataset.offerEnd === "1";
 }
 
+export function progressStage(pct, { finalized = false, vCount = 0, lang = "en" } = {}) {
+  const de = String(lang || "de").toLowerCase().startsWith("de");
+  const p = Math.max(0, Math.min(100, Number(pct) || 0));
+  if (finalized || vCount > 0) {
+    const n = vCount || 1;
+    return {
+      stage: "finalized",
+      label: de ? `Gespeichert v${n} ✓` : `Saved v${n} ✓`,
+    };
+  }
+  if (p >= 100) {
+    return {
+      stage: "complete",
+      label: de ? "Vollständig ✓" : "Complete ✓",
+    };
+  }
+  if (p >= 85) {
+    return {
+      stage: "almost",
+      label: de ? "Fast komplett" : "Almost complete",
+    };
+  }
+  if (p >= 60) {
+    return {
+      stage: "shaping",
+      label: de ? "nimmt Form an" : "Shaping up",
+    };
+  }
+  if (p >= 25) {
+    return {
+      stage: "building",
+      label: de ? "Im Aufbau" : "Building",
+    };
+  }
+  return {
+    stage: "starting",
+    label: de ? "Start" : "Starting",
+  };
+}
+
 export function renderSlots(session) {
   const slotsEl = document.getElementById("slots");
   const stats = dossierStats(session);
@@ -141,9 +182,53 @@ export function renderSlots(session) {
       .map((slot) => slotCardHtml(slot, (session.objects || {})[slot] || {}, evaluation))
       .join("")
     : "";
-  document.getElementById("progressBar").style.width = `${stats.pct}%`;
+  const bar = document.getElementById("progressBar");
+  if (bar) bar.style.width = `${stats.pct}%`;
+  const vCount = Array.isArray(session?.dossier_versions) ? session.dossier_versions.length : 0;
+  const { stage, label } = progressStage(stats.pct, {
+    finalized: Boolean(session?.finalized),
+    vCount,
+    lang: session?.language || "de",
+  });
   const pctEl = document.getElementById("dossierPct");
-  if (pctEl) pctEl.textContent = `${stats.pct}%`;
+  if (pctEl) {
+    if (!session) pctEl.textContent = "0%";
+    else if (stage === "finalized") pctEl.textContent = label;
+    else pctEl.textContent = `${stats.pct}% · ${label}`;
+  }
+  const extractBtn = document.getElementById("dossierExtractBtn");
+  if (extractBtn) {
+    extractBtn.hidden = !session;
+    extractBtn.disabled = !session || appState.processBusy?.kind === "extract";
+  }
+  const chipEl = pctEl?.closest?.(".dossier-chip");
+  if (chipEl) {
+    chipEl.dataset.stage = session ? stage : "starting";
+  }
+  const appEl = document.getElementById("app");
+  const rootEl = document.documentElement;
+  const stageVal = session ? stage : "starting";
+  const pctVal = session ? stats.pct : 0;
+  // Smooth HSL hue interpolation from warm orange (hue 14°) at 0% -> emerald-mint (hue 158°) at 100%.
+  const ratio = Math.max(0, Math.min(1, pctVal / 100));
+  const hueA = Math.round(14 + ratio * 144); // 14° (orange) -> 158° (mint-emerald)
+  const hueB = Math.round(36 + ratio * 136); // 36° (amber)  -> 172° (teal)
+  const hueC = Math.round(28 + ratio * 120); // 28° (warm)   -> 148° (sage)
+  const accentColor = `hsl(${hueA} 82% ${Math.round(56 - ratio * 14)}%)`;
+  const glowColor = `hsl(${hueB} 74% ${Math.round(62 - ratio * 10)}%)`;
+  const ambientGrad = `linear-gradient(155deg, hsl(${hueA} 88% 56%) 0%, hsl(${hueC} 58% 62%) 28%, rgb(107, 231, 253) 55%, hsl(${hueB} 72% 74%) 78%, hsl(${hueA} 76% 52%) 100%)`;
+
+  if (appEl) {
+    appEl.dataset.progressStage = stageVal;
+  }
+  if (rootEl) {
+    rootEl.dataset.progressStage = stageVal;
+    rootEl.style.setProperty("--progress-pct", `${pctVal}%`);
+    rootEl.style.setProperty("--progress-not-pct", `${100 - pctVal}%`);
+    rootEl.style.setProperty("--progress-accent", accentColor);
+    rootEl.style.setProperty("--progress-glow", glowColor);
+    rootEl.style.setProperty("--master-ambient", ambientGrad);
+  }
   setExportLinks(session ? session.id : null);
   renderFinalizeUi(session, stats);
 }

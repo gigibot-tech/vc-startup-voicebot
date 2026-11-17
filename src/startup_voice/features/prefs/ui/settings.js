@@ -12,10 +12,11 @@
  * (Hero layout is fixed — no compact/main switch.)
  */
 
+import { api } from "../../shared/api.js";
 import { clamp01, clampSpeed, fmt01 } from "../../shared/format.js";
 import { modelManager } from "../../shared/model-manager.js";
 import { applyChromeI18n } from "./chrome-i18n.js";
-import { prefs, savePrefs } from "./prefs.js";
+import { isBrowserLlm, prefs, savePrefs } from "./prefs.js";
 
 /** @param {{voice: object, onMetaChange: () => void, onLanguageChange?: (lang: string) => void | Promise<void>}} deps */
 export function createSettings({ voice, onMetaChange, onLanguageChange }) {
@@ -26,6 +27,8 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
   let whisperCard = null;
   /** @type {{destroy:()=>void}|null} */
   let llmCard = null;
+  /** @type {{destroy:()=>void}|null} */
+  let ttsCard = null;
 
   function applyTheme() {
     const dark = prefs.theme === "dark" || (prefs.theme === "system" && themeMq.matches);
@@ -49,21 +52,34 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     }
     const topPick = $("topSessionPickWrap");
     if (topPick) topPick.hidden = Boolean(prefs.sidebarOpen);
+    fitHeader();
+  }
+
+  /** Keep the topbar on one line: drop the session select when it overflows. */
+  let fittingHeader = false;
+  function fitHeader() {
+    if (fittingHeader) return;
+    const bar = $("topbar");
+    const pick = $("topSessionPickWrap");
+    if (!bar) return;
+    fittingHeader = true;
+    try {
+      const narrow = window.matchMedia("(max-width: 720px)").matches;
+      if (!pick || pick.hidden || narrow) {
+        bar.classList.remove("topbar--overflow");
+        return;
+      }
+      bar.classList.remove("topbar--overflow");
+      bar.classList.toggle("topbar--overflow", bar.scrollWidth > bar.clientWidth + 1);
+    } finally {
+      fittingHeader = false;
+    }
   }
 
   function syncVoiceDeps() {
     const deps = $("voiceDeps");
     deps.disabled = !prefs.voice;
     deps.title = prefs.voice ? "" : "Only with “Read replies aloud”";
-  }
-
-  function syncToneUi() {
-    [["stability", "stabilityRange", "stabilityVal"], ["similarity", "similarityRange", "similarityVal"]]
-      .forEach(([key, rangeId, valId]) => {
-        if (!$(rangeId)) return;
-        $(rangeId).value = String(Math.round(prefs[key] * 100));
-        $(valId).textContent = fmt01(prefs[key]);
-      });
   }
 
   function releaseIfActive(slotKey) {
@@ -76,11 +92,23 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     }
   }
 
+  function syncToneUi() {
+    [["stability", "stabilityRange", "stabilityVal"], ["similarity", "similarityRange", "similarityVal"]]
+      .forEach(([key, rangeId, valId]) => {
+        if (!$(rangeId)) return;
+        $(rangeId).value = String(Math.round(prefs[key] * 100));
+        $(valId).textContent = fmt01(prefs[key]);
+        $(rangeId).closest("label")?.toggleAttribute("hidden", prefs.tts !== "elevenlabs");
+      });
+  }
+
   function syncModelCards() {
     const whisperSlot = $("whisperModelSlot");
     const llmSlot = $("llmModelSlot");
+    const ttsSlot = $("ttsModelSlot");
     const stt = prefs.stt === "whisper";
-    const llm = prefs.llm === "transformers";
+    const llm = isBrowserLlm(prefs.llm);
+    const ttsLocal = prefs.tts === "local" || prefs.tts === "transformers";
     if (whisperSlot) {
       whisperSlot.hidden = !stt;
       if (stt && !whisperCard) whisperCard = modelManager.createModelCard(whisperSlot, "whisper");
@@ -94,12 +122,28 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     }
     if (llmSlot) {
       llmSlot.hidden = !llm;
-      if (llm && !llmCard) llmCard = modelManager.createModelCard(llmSlot, "llm");
-      if (!llm) {
+      if (llm) {
+        const modelKey = prefs.llm === "gemma-3n-e2b" ? "gemma-3n-e2b" : "granite-3b";
+        void modelManager.setLlmModelKey(modelKey).catch(() => {});
+        if (!llmCard) llmCard = modelManager.createModelCard(llmSlot, "llm");
+      } else {
         releaseIfActive("llm");
         if (llmCard) {
           llmCard.destroy();
           llmCard = null;
+        }
+      }
+    }
+    if (ttsSlot) {
+      ttsSlot.hidden = !ttsLocal;
+      if (ttsLocal) {
+        void modelManager.setTtsLanguage(prefs.lang || "de").catch(() => {});
+        if (!ttsCard) ttsCard = modelManager.createModelCard(ttsSlot, "tts");
+      } else {
+        releaseIfActive("tts");
+        if (ttsCard) {
+          ttsCard.destroy();
+          ttsCard = null;
         }
       }
     }
@@ -112,8 +156,16 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     $("autoListen").checked = prefs.auto;
     const sttSel = $("sttSel");
     if (sttSel && prefs.stt && prefs.stt !== "auto") sttSel.value = prefs.stt;
+    const ttsSel = $("ttsSel");
+    if (ttsSel) {
+      const v = prefs.tts === "transformers" ? "local" : (prefs.tts || "local");
+      ttsSel.value = [...ttsSel.options].some((o) => o.value === v) ? v : "local";
+    }
     const llmSel = $("llmSel");
-    if (llmSel) llmSel.value = prefs.llm === "transformers" ? "transformers" : "ollama";
+    if (llmSel) {
+      const v = prefs.llm === "transformers" ? "granite-3b" : prefs.llm;
+      llmSel.value = [...llmSel.options].some((o) => o.value === v) ? v : "ollama";
+    }
     const ar = $("autoResolveMinSel");
     if (ar) {
       const v = String(prefs.autoResolveMin);
@@ -161,6 +213,28 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     applyLayout();
   }
 
+  /** Voice mode dropdown: offer only what the server says is configured, explain what is not. */
+  async function syncVoiceModeUi() {
+    const sel = $("voiceModeSel");
+    if (!sel) return;
+    let transports = [];
+    try { transports = (await api("/api/voice/transports")).transports || []; } catch { /* offline: classic only */ }
+    const reasons = [];
+    for (const opt of sel.options) {
+      const info = transports.find((x) => x.name === opt.value);
+      const ok = opt.value === "classic" || voice.isAvailable(opt.value);
+      opt.disabled = !ok;
+      opt.title = ok ? "" : (info?.reason || "not available");
+      if (!ok) reasons.push(`${opt.textContent.split(" (")[0]}: ${info?.reason || "not available"}`);
+    }
+    sel.value = voice.getMode();
+    const hint = $("voiceModeHint");
+    if (hint) hint.dataset.unavailable = reasons.join(" · ");
+    if (hint && reasons.length) {
+      hint.textContent = `${hint.textContent.split(" — unavailable:")[0]} — unavailable: ${reasons.join(" · ")}`;
+    }
+  }
+
   function bindPref(id, event, read, key, after) {
     $(id)?.addEventListener(event, () => {
       prefs[key] = read($(id));
@@ -181,15 +255,28 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
       prefs.lang = $("langSel").value;
       savePrefs();
       applyChromeI18n(prefs.lang);
+      if (prefs.tts === "local" || prefs.tts === "transformers") {
+        void modelManager.setTtsLanguage(prefs.lang).catch(() => {});
+      }
       try {
         await onLanguageChange?.(prefs.lang);
       } finally {
         onMetaChange?.();
       }
     });
+    bindPref("voiceModeSel", "change", (e) => e.value, "voiceMode", () => {
+      voice.refresh(); // ends a running call, hands over to the other driver
+      void syncVoiceModeUi();
+      onMetaChange?.();
+    });
     bindPref("sttSel", "change", (e) => e.value, "stt", () => {
       voice.applySttProvider();
       syncModelCards();
+      onMetaChange?.();
+    });
+    bindPref("ttsSel", "change", (e) => e.value, "tts", () => {
+      syncModelCards();
+      syncToneUi();
       onMetaChange?.();
     });
     bindPref("llmSel", "change", (e) => e.value, "llm", () => {
@@ -211,7 +298,22 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     document.querySelectorAll(".icon-toggle").forEach((btn) => {
       btn.addEventListener("click", () => flipToggle(btn));
     });
+    const bar = $("topbar");
+    if (bar && window.ResizeObserver) {
+      const ro = new ResizeObserver(() => fitHeader());
+      ro.observe(bar);
+    } else {
+      window.addEventListener("resize", () => fitHeader());
+    }
+    const banner = $("processBanner");
+    if (banner && window.MutationObserver) {
+      new MutationObserver(() => fitHeader()).observe(banner, {
+        attributes: true,
+        attributeFilter: ["hidden", "class"],
+      });
+    }
+    window.addEventListener("resize", () => fitHeader());
   }
 
-  return { paint, bind, syncToneUi, applyLayout };
+  return { paint, bind, syncToneUi, applyLayout, syncVoiceModeUi };
 }

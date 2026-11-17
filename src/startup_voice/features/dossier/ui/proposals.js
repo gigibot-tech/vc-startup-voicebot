@@ -227,6 +227,19 @@ export function createProposals({ voice, sessions }) {
     lastSignature = null;
   }
 
+  function paintHistoryRow(session) {
+    const row = document.getElementById("conflictHistoryRow");
+    if (!row) return;
+    const hist = session?.conflict_history || [];
+    if (!hist.length) {
+      row.innerHTML = "";
+      row.hidden = true;
+      return;
+    }
+    row.hidden = false;
+    row.innerHTML = historyHtml(session);
+  }
+
   function paintShell(session, items) {
     const rows = chunkRows(items);
     const min = autoResolveMin();
@@ -242,8 +255,7 @@ export function createProposals({ voice, sessions }) {
           <button type="button" class="pill-outline" data-act="save-all" disabled>✓ Save selection (0)</button>
         </div>
       </div>
-      <div class="proposal-list__rows">${rows.map(rowHtml).join("")}</div>
-      ${historyHtml(session)}`;
+      <div class="proposal-list__rows">${rows.map(rowHtml).join("")}</div>`;
     syncButtons();
   }
 
@@ -288,31 +300,25 @@ export function createProposals({ voice, sessions }) {
     [...drafts.keys()].forEach((k) => { if (!alive.has(k)) drafts.delete(k); });
     const hist = session?.conflict_history || [];
     const histSig = `${session?.id || ""}|${hist.length}|${hist.at(-1)?.at || ""}`;
+    if (histSig !== lastHistorySig || !document.querySelector("#conflictHistoryRow .conflict-hist")) {
+      lastHistorySig = histSig;
+      paintHistoryRow(session);
+    }
 
     if (!items.length) {
       lastSignature = null;
-      if (hist.length) {
-        host.hidden = false;
-        if (histSig !== lastHistorySig || !host.querySelector(".conflict-hist")) {
-          lastHistorySig = histSig;
-          host.innerHTML = historyHtml(session);
-        }
-      } else {
-        lastHistorySig = "";
-        host.innerHTML = "";
-        host.hidden = true;
-      }
+      host.innerHTML = "";
+      host.hidden = true;
       return;
     }
 
     const signature = items.map(({ slot, field, p }) =>
       `${session.id}|${keyOf(slot, field)}|${p.old}|${p.new}|${confOf(p)}`).join("§");
-    if (signature === lastSignature && histSig === lastHistorySig) {
+    if (signature === lastSignature) {
       void autoResolveHighConfidence(session);
       return;
     }
     lastSignature = signature;
-    lastHistorySig = histSig;
     paintShell(session, items);
     void autoResolveHighConfidence(session);
   }

@@ -4,7 +4,7 @@
  * BUTTON -> HANDLER -> BACKEND   (backend docs: features/sessions/routes.py)
  * ==========================================================================
  *
- * [Neues Gespräch]            #newBtn         -> bind(): refreshPicker() + goPicker()
+ * [Neues Gespräch]            #newBtn (sidebar) -> bind(): refreshPicker() + goPicker()
  *                                                GET /api/sessions   (nothing is created yet)
  * [Neues Gespräch jetzt starten] #confirmNewBtn -> startSession()
  *                                                POST /api/sessions {language}  (no LLM call; the

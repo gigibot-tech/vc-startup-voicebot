@@ -38,7 +38,7 @@ import {
   activeId, activeSession, appState, clearProcessBusy, clearTurnError, confirmInterruptProcess,
   isPicker, nav, setLoading, setProcessBusy, setTurnError,
 } from "../../shared/state.js";
-import { prefs } from "../prefs/prefs.js";
+import { isBrowserLlm, prefs } from "../prefs/prefs.js";
 import { t } from "../prefs/chrome-i18n.js";
 
 /**
@@ -53,6 +53,8 @@ export function createChat({ voice, sessions }) {
 
   /** @type {AbortController|null} */
   let turnAbort = null;
+  /** @type {Promise<void>|null} Resolves when the previous turn's background dossier extract finishes. */
+  let inFlightExtractPromise = null;
 
   /** Append one chat bubble (both assistant & user as bubbles + timestamp + optional ctx warning). */
   function addQa(role, text, ts, warning = "") {
@@ -187,11 +189,23 @@ export function createChat({ voice, sessions }) {
   function isDossierComplete(session) {
     if (!session) return false;
     const ev = session.evaluation;
-    if (!ev) return false;
-    if (ev.ready_for_closing) return true;
-    const cov = Number(ev.field_coverage || 0);
-    const miss = Array.isArray(ev.missing_fields) ? ev.missing_fields.length : 1;
-    return cov >= 1 || miss === 0;
+    if (ev?.ready_for_closing) return true;
+    if (ev && (Number(ev.field_coverage || 0) >= 1 || (Array.isArray(ev.missing_fields) && ev.missing_fields.length === 0))) {
+      return true;
+    }
+    // Also check actual slot fields directly so as soon as 15/15 fields are non-empty (100%),
+    // the end state triggers immediately even if evaluation metadata is stale.
+    const slots = Object.values(session.objects || {});
+    if (!slots.length) return false;
+    let total = 0;
+    let filled = 0;
+    slots.forEach((obj) => {
+      Object.values(obj?.fields || {}).forEach((v) => {
+        total += 1;
+        if (String(v || "").trim()) filled += 1;
+      });
+    });
+    return total > 0 && filled >= total;
   }
 
   function hasUnsavedChanges(session) {
@@ -275,13 +289,16 @@ export function createChat({ voice, sessions }) {
     }
   }
 
-  function showIntakeEnd() {
+  function showIntakeEnd({ compact = false } = {}) {
     const el = document.getElementById("intakeEnd");
     const app = document.getElementById("app");
-    if (el) el.hidden = false;
+    if (el) {
+      el.hidden = false;
+      el.classList.toggle("is-compact", Boolean(compact));
+    }
     if (app) {
       app.dataset.offerEnd = "1";
-      delete app.dataset.dismissEnd;
+      if (!compact) delete app.dataset.dismissEnd;
     }
     const s = activeSession();
     if (s) paintIntakeEndContent(s);
@@ -291,24 +308,40 @@ export function createChat({ voice, sessions }) {
   function hideIntakeEnd({ userDismiss = false } = {}) {
     const el = document.getElementById("intakeEnd");
     const app = document.getElementById("app");
-    if (el) el.hidden = true;
+    const s = activeSession();
+    const complete = isDossierComplete(s);
+    const hasVersions = Array.isArray(s?.dossier_versions) && s.dossier_versions.length > 0;
+    // When dossier is 100% complete (or has saved versions), never hide #intakeEnd completely:
+    // collapse it into a compact bar when "Continue asking" is pressed or a turn is sent!
+    if ((complete || hasVersions) && s) {
+      if (app && userDismiss) app.dataset.dismissEnd = String(s.turn_index ?? "1");
+      showIntakeEnd({ compact: true });
+      return;
+    }
+    if (el) {
+      el.hidden = true;
+      el.classList.remove("is-compact");
+    }
     if (app) {
       delete app.dataset.offerEnd;
-      if (userDismiss) app.dataset.dismissEnd = String(activeSession()?.turn_index ?? "1");
+      if (userDismiss) app.dataset.dismissEnd = String(s?.turn_index ?? "1");
       else delete app.dataset.dismissEnd;
     }
-    const ready = isDossierComplete(activeSession());
-    document.getElementById("finalizeBlock")?.classList.toggle("is-ready", ready);
+    document.getElementById("finalizeBlock")?.classList.toggle("is-ready", complete);
   }
 
   /**
-   * Auto-trigger END / vX banner right above Resolved conflicts after any dossier update
-   * (SSE done, proposal resolve, finalize, or session open).
+   * Auto-trigger END / vX banner as soon as dossier hits 100% (or after any dossier update).
+   * If the user pressed "Continue asking" on this turn, keep it visible in compact mode.
    */
   function syncIntakeEnd(session) {
     const app = document.getElementById("app");
     if (!session) {
-      hideIntakeEnd();
+      const el = document.getElementById("intakeEnd");
+      if (el) {
+        el.hidden = true;
+        el.classList.remove("is-compact");
+      }
       return;
     }
     const hasVersions = Array.isArray(session.dossier_versions) && session.dossier_versions.length > 0;
@@ -318,11 +351,9 @@ export function createChat({ voice, sessions }) {
       hideIntakeEnd();
       return;
     }
-    // User explicitly clicked Continue on this turn — stay hidden until next turn/save.
-    if (app?.dataset.dismissEnd === String(session.turn_index ?? "") && !hasVersions) {
-      return;
-    }
-    showIntakeEnd();
+    // User clicked Continue on this turn — shrink to compact bar instead of disappearing!
+    const compact = Boolean(app?.dataset.dismissEnd === String(session.turn_index ?? ""));
+    showIntakeEnd({ compact });
   }
 
   /** Keep the failed user line on the in-memory session so re-render does not drop it. */
@@ -387,6 +418,7 @@ export function createChat({ voice, sessions }) {
 
   function renderChat(session) {
     placeSpeakDock(); // out of qaList before wipe
+    const liveBubble = qaList.querySelector(".team-qa--live");
     qaList.innerHTML = "";
     if (!session) {
       placeSpeakDock();
@@ -415,20 +447,45 @@ export function createChat({ voice, sessions }) {
     } else {
       placeSpeakDock();
     }
+    // Keep the live STT bubble while a background extract re-paints the chat.
+    if (liveBubble && !qaList.querySelector(".team-qa--live")) {
+      qaList.appendChild(liveBubble);
+    }
   }
 
   /**
    * Mic / stop during an in-flight turn: cancel the SSE fetch so sendText lands in catch.
+   * Background dossier extract stays running when ``keepExtract`` is set (Speak during update).
    */
-  function abortTurn() {
+  function abortTurn({ keepExtract = false } = {}) {
+    const replyBusy = Boolean(appState.loading && appState.loadingKind === "turn");
+    if (keepExtract && !replyBusy) return;
     if (turnAbort) {
       try { turnAbort.abort(); } catch { /* ignore */ }
     }
     turnAbort = null;
+    inFlightExtractPromise = null;
     nav.turnBusy = false;
     appState.turnHint = null;
     hideProcessBusy();
     if (appState.loading && appState.loadingKind === "turn") setLoading(false);
+  }
+
+  /**
+   * Register a background extract so sendText waits (does not abort) until it finishes.
+   * @returns {() => void} settle callback
+   */
+  function beginExtractWait() {
+    let settled = false;
+    let resolve;
+    const p = new Promise((res) => { resolve = res; });
+    inFlightExtractPromise = p;
+    return () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+      if (inFlightExtractPromise === p) inFlightExtractPromise = null;
+    };
   }
 
   /**
@@ -451,7 +508,7 @@ export function createChat({ voice, sessions }) {
    * response is dropped instead of being painted into the wrong chat.
    */
   async function sendText(text, { isRetry = false } = {}) {
-    if (prefs.llm === "transformers") {
+    if (isBrowserLlm(prefs.llm)) {
       return sendTextBrowser(text, { isRetry });
     }
     return sendTextServer(text, { isRetry });
@@ -461,29 +518,48 @@ export function createChat({ voice, sessions }) {
   async function sendTextBrowser(text, { isRetry = false } = {}) {
     const trimmed = (text || "").trim();
     const id = activeId();
-    const session = activeSession();
+    let session = activeSession();
     if (isPicker() || !id || !session || !trimmed || nav.turnBusy || appState.loading) return;
-    if (appState.processBusy && !confirmInterruptProcess(session.language || "de")) return;
     clearTurnError();
     const seq = nav.seq;
-    if (turnAbort) {
-      try { turnAbort.abort(); } catch { /* ignore */ }
-    }
     nav.turnBusy = true;
     ensureTrailingUser(session, trimmed);
     hideIntakeEnd();
-    appState.turnHint = "Thinking…";
+    const de = String(session.language || "de").toLowerCase().startsWith("de");
+    const waitingForExtract = Boolean(inFlightExtractPromise);
+    appState.turnHint = waitingForExtract
+      ? (de ? "Wartet kurz auf Dossier-Update…" : "Waiting for dossier update…")
+      : "Thinking…";
     setLoading(true, "turn");
-    showProcessBusy("turn", id, t("thinking", session.language || "de"));
     voice.stopMicCapture({ keepPhase: true });
     voice.stopSpeak();
     voice.beginSpeakStream?.();
     voice.setVoicePhase("thinking");
+    let thinking = showThinkingBubble(appState.turnHint);
+
+    // If the previous turn is still updating the dossier in the background, WAIT for it to
+    // finish instead of aborting it — so the new reply sees the freshly updated dossier!
+    if (inFlightExtractPromise) {
+      try { await inFlightExtractPromise; } catch { /* ignore */ }
+      if (nav.isStale(seq, id)) {
+        removeThinking(thinking);
+        nav.turnBusy = false;
+        setLoading(false);
+        return;
+      }
+      session = activeSession() || session;
+      ensureTrailingUser(session, trimmed);
+      appState.turnHint = "Thinking…";
+      thinking = showThinkingBubble(appState.turnHint);
+    }
+
+    showProcessBusy("turn", id, t("thinking", session.language || "de"));
     turnAbort = new AbortController();
     const myAbort = turnAbort;
-    let thinking = showThinkingBubble(appState.turnHint);
     let unlockedForSpeak = false;
     let bubble = null;
+    let resolveExtractDone;
+    inFlightExtractPromise = new Promise((res) => { resolveExtractDone = res; });
     const maybeShowIntakeEnd = (d) => {
       if (d?.offer_end || isDossierComplete(d?.session)) showIntakeEnd();
     };
@@ -626,8 +702,10 @@ export function createChat({ voice, sessions }) {
         setTurnError({ sessionId: id, text: trimmed, message });
       }
     } finally {
+      resolveExtractDone?.();
       if (turnAbort === myAbort) {
         turnAbort = null;
+        inFlightExtractPromise = null;
         appState.turnHint = null;
         if (!unlockedForSpeak) {
           nav.turnBusy = false;
@@ -644,34 +722,50 @@ export function createChat({ voice, sessions }) {
   async function sendTextServer(text, { isRetry = false } = {}) {
     const trimmed = (text || "").trim();
     const id = activeId();
-    const session = activeSession();
+    let session = activeSession();
     if (isPicker() || !id || !session || !trimmed || nav.turnBusy || appState.loading) return;
-    // Sending again while extract still runs aborts that process — warn first.
-    if (appState.processBusy && !confirmInterruptProcess(session.language || "de")) return;
     clearTurnError();
     const seq = nav.seq;
-    // New answer aborts an in-flight extract/SSE so turns stay single-flight on the wire.
-    if (turnAbort) {
-      try { turnAbort.abort(); } catch { /* ignore */ }
-    }
     nav.turnBusy = true;
     // Persist user line before paint so renderChat order is: … → Du → thinking bubble.
     ensureTrailingUser(session, trimmed);
     hideIntakeEnd();
-    appState.turnHint = "Thinking…";
+    const de = String(session.language || "de").toLowerCase().startsWith("de");
+    const waitingForExtract = Boolean(inFlightExtractPromise);
+    appState.turnHint = waitingForExtract
+      ? (de ? "Wartet kurz auf Dossier-Update…" : "Waiting for dossier update…")
+      : "Thinking…";
     setLoading(true, "turn");
-    // Header: Thinking… first; Switching to Updating dossier… only after reply unlock.
-    showProcessBusy("turn", id, t("thinking", session.language || "de"));
     voice.stopMicCapture({ keepPhase: true });
     voice.stopSpeak();
     voice.beginSpeakStream?.();
     voice.setVoicePhase("thinking");
+    let thinking = showThinkingBubble(appState.turnHint);
+
+    // If the previous turn is still updating the dossier in the background, WAIT for it to
+    // finish instead of aborting it — so the new reply sees the freshly updated dossier!
+    if (inFlightExtractPromise) {
+      try { await inFlightExtractPromise; } catch { /* ignore */ }
+      if (nav.isStale(seq, id)) {
+        removeThinking(thinking);
+        nav.turnBusy = false;
+        setLoading(false);
+        return;
+      }
+      session = activeSession() || session;
+      ensureTrailingUser(session, trimmed);
+      appState.turnHint = "Thinking…";
+      thinking = showThinkingBubble(appState.turnHint);
+    }
+
+    // Header: Thinking… first; Switching to Updating dossier… only after reply unlock.
+    showProcessBusy("turn", id, t("thinking", session.language || "de"));
     turnAbort = new AbortController();
     const myAbort = turnAbort;
-    // renderChat (from setLoading) already appended thinking — reuse / ensure.
-    let thinking = showThinkingBubble(appState.turnHint);
     let unlockedForSpeak = false;
     let bubble = null;
+    let resolveExtractDone;
+    inFlightExtractPromise = new Promise((res) => { resolveExtractDone = res; });
     const setTurnHint = (msg) => {
       appState.turnHint = msg;
       const hint = document.getElementById("composerHint");
@@ -801,8 +895,10 @@ export function createChat({ voice, sessions }) {
         setTurnError({ sessionId: id, text: trimmed, message });
       }
     } finally {
+      resolveExtractDone?.();
       if (turnAbort === myAbort) {
         turnAbort = null;
+        inFlightExtractPromise = null;
         appState.turnHint = null;
         if (!unlockedForSpeak) {
           nav.turnBusy = false;
@@ -842,7 +938,7 @@ export function createChat({ voice, sessions }) {
     const thinking = showThinkingBubble(appState.turnHint);
     try {
       let data;
-      if (prefs.llm === "transformers") {
+      if (isBrowserLlm(prefs.llm)) {
         await modelManager.ensureLoaded("llm");
         const prepared = await api(`/api/sessions/${id}/continue/prepare`, {
           method: "POST",
@@ -916,5 +1012,8 @@ export function createChat({ voice, sessions }) {
     });
   }
 
-  return { sendText, renderChat, bind, abortTurn, placeSpeakDock, hideIntakeEnd, syncIntakeEnd };
+  return {
+    sendText, renderChat, bind, abortTurn, beginExtractWait,
+    placeSpeakDock, hideIntakeEnd, syncIntakeEnd,
+  };
 }

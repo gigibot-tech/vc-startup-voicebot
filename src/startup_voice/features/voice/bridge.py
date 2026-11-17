@@ -89,7 +89,7 @@ def encode_inner_monologue_inject(text: str) -> bytes:
 def personaplex_system_prompt() -> str:
     slots = "; ".join(f"{s}: {DIMENSIONS_SPEC[s].label}" for s in SLOT_ORDER)
     return (
-        "You are an HTGF first-conversation analyst. Collect solid facts for: "
+        "You are a first-conversation analyst. Collect solid facts for: "
         f"{slots}. Ask one precise follow-up at a time. Use tools to save facts."
     )
 

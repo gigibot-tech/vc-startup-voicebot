@@ -189,10 +189,11 @@ export function createVoice({
       title = de ? "Verarbeitung abbrechen" : "Cancel current request";
       thinking = true;
     } else if (extracting) {
-      label = de ? "Dossier aktualisiert… (bitte warten)" : "Updating dossier… (best wait)";
+      // Allow speaking freely while the dossier updates in the background!
+      label = de ? "Sprechen" : "Speak";
       title = de
-        ? "Dossier wird noch aktualisiert — klicken unterbricht das Update"
-        : "Dossier is still updating — clicking interrupts the update";
+        ? "Jetzt schon sprechen (Dossier-Update läuft im Hintergrund weiter)"
+        : "Speak now (dossier update continues in background)";
     }
     dock?.classList.toggle("is-thinking", thinking);
     dock?.classList.toggle("is-speaking", speaking);
@@ -201,7 +202,7 @@ export function createVoice({
       btn.classList.toggle("is-live", live);
       btn.classList.toggle("is-thinking", thinking);
       btn.classList.toggle("is-speaking", speaking);
-      btn.classList.toggle("is-extracting", extracting);
+      btn.classList.toggle("is-extracting", extracting && !live && !speaking && !thinking);
       btn.classList.toggle("recording", live);
       const labelEl = btn.querySelector(".mic-btn__label");
       if (labelEl) labelEl.textContent = label;
@@ -255,6 +256,35 @@ export function createVoice({
     }
   }
 
+  /** Animated waveform for Web Speech (without opening a competing getUserMedia stream). */
+  function startSyntheticWaveform() {
+    stopWaveform();
+    const canvas = document.getElementById("listenWave");
+    if (!canvas) return;
+    let tick = 0;
+    const draw = () => {
+      waveRaf = requestAnimationFrame(draw);
+      tick += 0.12;
+      const c = canvas.getContext("2d");
+      if (!c) return;
+      const w = canvas.width;
+      const h = canvas.height;
+      c.clearRect(0, 0, w, h);
+      const bars = 28;
+      const gap = 2;
+      const bw = (w - gap * (bars - 1)) / bars;
+      for (let i = 0; i < bars; i++) {
+        const mag = 0.22 + 0.38 * Math.abs(Math.sin(tick + i * 0.45));
+        const bh = Math.max(3, mag * h * 0.85);
+        const x = i * (bw + gap);
+        const y = (h - bh) / 2;
+        c.fillStyle = `rgba(180, 40, 90, ${0.35 + mag * 0.5})`;
+        c.fillRect(x, y, bw, bh);
+      }
+    };
+    draw();
+  }
+
   function startWaveform(stream) {
     stopWaveform();
     const canvas = document.getElementById("listenWave");
@@ -301,15 +331,14 @@ export function createVoice({
   }[sttProvider] || sttProvider);
 
   function resolveSttProvider() {
-    // Whisper runs fully in-browser — always selectable without server keys.
-    if (prefs.stt === "whisper") return "whisper";
+    // Both "browser" (Web Speech) and "whisper" run in the browser — always selectable!
+    if (prefs.stt === "browser" || prefs.stt === "whisper") return prefs.stt;
     if (prefs.stt && prefs.stt !== "auto" && sttProviders.includes(prefs.stt)) {
       return prefs.stt;
     }
     if (sttProviders.includes("elevenlabs")) return "elevenlabs";
     if (sttProviders.includes("deepgram")) return "deepgram";
-    // Plan: Whisper is the default fallback when cloud STT keys are absent.
-    return "whisper";
+    return "browser";
   }
 
   function applySttProvider() {
@@ -320,8 +349,7 @@ export function createVoice({
         const always = opt.value === "browser" || opt.value === "whisper";
         opt.disabled = !always && !sttProviders.includes(opt.value);
       });
-      if (prefs.stt === "whisper") sel.value = "whisper";
-      else sel.value = sttProviders.includes(prefs.stt) ? prefs.stt : sttProvider;
+      sel.value = sttProvider;
     }
     onProviderChange();
   }
@@ -464,6 +492,8 @@ export function createVoice({
     speakJoined = "";
     speakQueue = [];
     speakPumping = false;
+    stopLocalTtsPlayback();
+    try { window.speechSynthesis?.cancel(); } catch { /* ignore */ }
     if (!audioEl) return;
     const el = audioEl;
     audioEl = null;
@@ -481,11 +511,136 @@ export function createVoice({
   function afterSpeak() {
     clearAwaitingGreeting();
     if (voicePhase === "speaking") setVoicePhase("idle");
-    // Do NOT auto-open the mic while dossier extract is still running — wait until it finishes!
-    if (prefs.auto && !extractBusyInDock && canListen()) startListening();
+    // You can speak while dossier extract runs in the background!
+    if (prefs.auto && canListen()) startListening();
+  }
+
+  let cloudTtsDown = false;
+  /** AudioContext playback for local Transformers.js TTS. */
+  let localTtsPlayback = null;
+
+  function resolveTtsProvider() {
+    const v = String(prefs.tts || "local").toLowerCase();
+    if (v === "transformers") return "local";
+    if (v === "browser" || v === "elevenlabs" || v === "local") return v;
+    return "local";
+  }
+
+  function stopLocalTtsPlayback() {
+    if (!localTtsPlayback) return;
+    const cur = localTtsPlayback;
+    localTtsPlayback = null;
+    try { cur.src.stop(); } catch { /* ignore */ }
+    try { cur.ctx.close(); } catch { /* ignore */ }
+  }
+
+  function playAudioSamples(samples, sampleRate, gen) {
+    return new Promise((resolve, reject) => {
+      if (gen !== speakGen) {
+        resolve();
+        return;
+      }
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) {
+        reject(new Error("No AudioContext"));
+        return;
+      }
+      const ctx = new Ctx();
+      const data = samples instanceof Float32Array ? samples : new Float32Array(samples || []);
+      if (!data.length) {
+        try { ctx.close(); } catch { /* ignore */ }
+        resolve();
+        return;
+      }
+      const buf = ctx.createBuffer(1, data.length, Number(sampleRate) || 16000);
+      buf.copyToChannel(data, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.playbackRate.value = clampSpeed(prefs.speed);
+      src.connect(ctx.destination);
+      const done = () => {
+        if (localTtsPlayback && localTtsPlayback.src === src) localTtsPlayback = null;
+        try { ctx.close(); } catch { /* ignore */ }
+        resolve();
+      };
+      src.onended = done;
+      localTtsPlayback = { ctx, src };
+      try {
+        src.start();
+      } catch (err) {
+        done();
+        reject(err);
+      }
+    });
+  }
+
+  async function playLocalTts(text, gen) {
+    const { modelManager } = await import("../../shared/model-manager.js");
+    const lang = getLanguage();
+    const st = modelManager.getState("tts");
+    if (st?.state !== "ready" && st?.state !== "running") {
+      setStatus("Loading TTS…");
+    }
+    await modelManager.setTtsLanguage(lang);
+    await modelManager.ensureLoaded("tts");
+    if (gen !== speakGen) return;
+    const result = await modelManager.synthesize(text, lang);
+    if (gen !== speakGen) return;
+    const audio = result?.audio;
+    const rate = result?.sampling_rate || 16000;
+    await playAudioSamples(audio, rate, gen);
+  }
+
+  /** Browser SpeechSynthesis fallback when ElevenLabs TTS quota/network fails. */
+  function playBrowserTts(text, gen) {
+    return new Promise((resolve) => {
+      if (!window.speechSynthesis || gen !== speakGen) {
+        resolve();
+        return;
+      }
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(safetyTimer);
+        resolve();
+      };
+      // Safety timer: Chromium's SpeechSynthesis sometimes drops `onend`; never hang the queue!
+      const safetyTimer = setTimeout(done, Math.min(12000, Math.max(2500, text.length * 75)));
+      try {
+        if (window.speechSynthesis.speaking) {
+          window.speechSynthesis.cancel();
+        }
+        const u = new SpeechSynthesisUtterance(text);
+        // Keep a strong reference on window so Chrome GC never collects `u` mid-speech.
+        window.__activeUtterance = u;
+        u.lang = langTag(getLanguage());
+        u.rate = clampSpeed(prefs.speed);
+        u.onend = done;
+        u.onerror = done;
+        window.speechSynthesis.speak(u);
+      } catch {
+        done();
+      }
+    });
   }
 
   async function playTtsClip(text, gen) {
+    const provider = resolveTtsProvider();
+    if (provider === "local") {
+      try {
+        await playLocalTts(text, gen);
+        return;
+      } catch (err) {
+        console.warn("[tts] local model failed, falling back to Web Speech", err);
+        await playBrowserTts(text, gen);
+        return;
+      }
+    }
+    if (provider === "browser" || cloudTtsDown) {
+      await playBrowserTts(text, gen);
+      return;
+    }
     const res = await fetch("/api/tts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -497,7 +652,12 @@ export function createVoice({
         speed: clampSpeed(prefs.speed),
       }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      // Cloud TTS failed (e.g. ElevenLabs 0 credits remaining) -> remember & speak via browser TTS!
+      cloudTtsDown = true;
+      await playBrowserTts(text, gen);
+      return;
+    }
     if (gen !== speakGen) return;
     const url = URL.createObjectURL(await res.blob());
     if (gen !== speakGen) {
@@ -686,8 +846,16 @@ export function createVoice({
     fd.append("language", getLanguage());
     fd.append("provider", sttProvider === "browser" ? "auto" : sttProvider);
     fd.append("fallback", "1");
-    const res = await fetch("/api/stt", { method: "POST", body: fd });
-    const rawText = await res.text();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 12000);
+    let res;
+    let rawText = "";
+    try {
+      res = await fetch("/api/stt", { method: "POST", body: fd, signal: ctrl.signal });
+      rawText = await res.text();
+    } finally {
+      clearTimeout(timer);
+    }
     let data = null;
     try { data = rawText ? JSON.parse(rawText) : null; } catch { /* plain */ }
     if (!res.ok) {
@@ -757,28 +925,44 @@ export function createVoice({
           return;
         }
         setVoicePhase("thinking", `Transcribing (${sttLabel()})…`);
+        // Save the shadow Web Speech transcript BEFORE clearing the live bubble, so if
+        // cloud STT fails (e.g. ElevenLabs 0 credits / 502), we still have what was spoken!
+        const shadowText = liveTranscript.trim();
         try {
           const text = await transcribeCloud(blob);
           clearLiveBubble();
-          if (text) {
-            // ── HAND-OFF (cloud STT path) ─────────────────────────────────────
-            // voice.js ends here. The host decides what a transcript means;
-            // in this app that is sendText() → POST .../turn/stream → LLM.
-            await onTranscript(text);
+          const finalOut = text || shadowText;
+          if (finalOut) {
+            setVoicePhase("idle");
+            await onTranscript(finalOut);
           } else {
             setVoicePhase("idle", "Nothing recognized — try again");
           }
         } catch (err) {
           clearLiveBubble();
           if (sttProvider === "whisper") {
+            if (shadowText) {
+              setVoicePhase("idle");
+              await onTranscript(shadowText);
+              return;
+            }
             setVoicePhase("idle", `Whisper failed: ${String(err.message || err).slice(0, 100)}`);
             return;
           }
-          // Cloud STT failed after record — fall back to browser for next attempt.
+          // Cloud STT failed (e.g. ElevenLabs quota exceeded) — permanently switch to Web Speech
+          // for this session, and rescue the recording via shadowText or in-browser Whisper!
+          const failedProvider = sttProvider;
+          sttProviders = sttProviders.filter((p) => p !== failedProvider);
           preflightCache = { at: 0, stt: null, use: null, ok: false };
-          sttProvider = "browser";
-          onProviderChange();
-          setVoicePhase("idle", "Cloud STT down → Web Speech. Tap Speak again.");
+          prefs.stt = "browser";
+          try { localStorage.setItem("startupVoicePrefs", JSON.stringify(prefs)); } catch { /* ignore */ }
+          applySttProvider();
+          if (shadowText) {
+            setVoicePhase("idle", "Cloud STT quota → Web Speech");
+            await onTranscript(shadowText);
+            return;
+          }
+          setVoicePhase("idle", "Cloud STT quota exceeded → switched to Web Speech. Click Speak now.");
         }
       };
       mediaRecorder.start(250);
@@ -793,15 +977,25 @@ export function createVoice({
     }
   }
 
+  let browserStopRequested = false;
+
   function startBrowserListening() {
     if (voicePhase === "listening" && activeRecognition) {
+      browserStopRequested = true;
       try { activeRecognition.stop(); } catch { /* ignore */ }
       return;
     }
     const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Ctor) { setVoicePhase("idle", "Microphone unavailable — please type"); return; }
+    if (!Ctor) {
+      // Browser lacks SpeechRecognition (e.g. Firefox) -> fall back to Whisper MediaRecorder!
+      prefs.stt = "whisper";
+      applySttProvider();
+      void startCloudListening();
+      return;
+    }
     stopSpeak();
     stopMicCapture({ keepPhase: true });
+    browserStopRequested = false;
     const recognition = new Ctor();
     activeRecognition = recognition;
     recognition.lang = langTag(getLanguage());
@@ -809,9 +1003,13 @@ export function createVoice({
     // Continuous until Stop (#listenStopBtn / mic) — no silence auto-send.
     recognition.continuous = true;
     let finalText = "";
+    // Enter "listening" immediately so the UI NEVER gets stuck on "Verarbeitet… (Abbrechen)"!
+    setVoicePhase("listening", "Listening (Web Speech)… · Stop to send");
+    paintSttPreview("");
     recognition.onstart = () => {
-      setVoicePhase("listening");
-      paintSttPreview("");
+      if (activeRecognition === recognition) {
+        setVoicePhase("listening", "Listening (Web Speech)… · Stop to send");
+      }
     };
     recognition.onresult = (ev) => {
       let interim = "";
@@ -819,43 +1017,61 @@ export function createVoice({
         const t = ev.results[i][0].transcript;
         if (ev.results[i].isFinal) finalText += `${t} `; else interim += t;
       }
-      // Whole transcript: committed finals + live interim (was || and clipped the rest).
       paintSttPreview(`${finalText}${interim}`);
     };
-    recognition.onerror = () => {
-      if (activeRecognition === recognition) activeRecognition = null;
-      stopWaveform();
-      clearLiveBubble();
-      if (voicePhase === "listening") setVoicePhase("idle");
-    };
-    recognition.onend = async () => {
-      if (activeRecognition === recognition) activeRecognition = null;
-      stopWaveform();
-      if (voicePhase !== "listening") {
-        clearLiveBubble();
+    recognition.onerror = (ev) => {
+      const errCode = String(ev?.error || "");
+      // Ignore benign 'no-speech' / 'aborted' while waiting for Stop.
+      if ((errCode === "no-speech" || errCode === "aborted") && !browserStopRequested && voicePhase === "listening") {
         return;
       }
+      if (activeRecognition === recognition) activeRecognition = null;
+      stopWaveform();
+      // If Web Speech failed because of network/service error (e.g. Brave/offline), fall back
+      // to Whisper MediaRecorder automatically so STT ALWAYS works!
+      if ((errCode === "network" || errCode === "service-not-allowed") && navigator.mediaDevices?.getUserMedia) {
+        clearLiveBubble();
+        prefs.stt = "whisper";
+        applySttProvider();
+        void startListening();
+        return;
+      }
+      const rescued = takeLiveTranscript();
+      if (rescued) {
+        setVoicePhase("idle");
+        void onTranscript(rescued);
+        return;
+      }
+      clearLiveBubble();
+      if (voicePhase === "listening" || voicePhase === "thinking") {
+        setVoicePhase("idle", `Web Speech: ${errCode || "stopped"}`);
+      }
+    };
+    recognition.onend = async () => {
+      // Chrome stops SpeechRecognition on pauses even with continuous=true; if the user hasn't
+      // pressed Stop yet, restart seamlessly and keep accumulating finalText!
+      if (!browserStopRequested && voicePhase === "listening" && activeRecognition === recognition) {
+        try {
+          recognition.start();
+          return;
+        } catch {
+          /* fall through and send what we have */
+        }
+      }
+      if (activeRecognition === recognition) activeRecognition = null;
+      stopWaveform();
       const t = takeLiveTranscript();
-      // ── HAND-OFF (browser Web Speech path) ──────────────────────────────
-      // Same contract as the cloud path above: pass the string out, stop here.
+      setVoicePhase("idle");
       if (t) await onTranscript(t);
-      else setVoicePhase("idle");
     };
     try {
       recognition.start();
-      // Waveform meter (Web Speech has no audio stream of its own).
-      navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
-      }).then((stream) => {
-        if (activeRecognition !== recognition) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-        meterStream = stream;
-        startWaveform(stream);
-      }).catch(() => { /* meter optional */ });
+      // Use synthetic waveform instead of opening a second getUserMedia audio stream,
+      // which steals/resets the mic from SpeechRecognition on macOS Chrome/Safari!
+      startSyntheticWaveform();
     } catch {
       activeRecognition = null;
+      stopWaveform();
       clearLiveBubble();
       setVoicePhase("idle", "Microphone busy");
     }
@@ -867,7 +1083,14 @@ export function createVoice({
     stopSpeak();
     stopMicCapture({ keepPhase: true });
     sttProvider = resolveSttProvider();
-    // Whisper: MediaRecorder path, no server STT preflight.
+    // 1) Web Speech ("browser"): start SYNCHRONOUSLY without server preflight or "thinking" phase!
+    //    (Awaiting fetch before recognition.start() loses the browser user-gesture activation
+    //    and leaves the button stuck on "Verarbeitet… (Abbrechen)"!)
+    if (sttProvider === "browser") {
+      startBrowserListening();
+      return;
+    }
+    // 2) Whisper (in-browser): MediaRecorder path, no server STT preflight.
     if (sttProvider === "whisper") {
       if (!navigator.mediaDevices?.getUserMedia) {
         sttProvider = "browser";
@@ -880,26 +1103,31 @@ export function createVoice({
         setVoicePhase("thinking", "Loading Whisper…");
         await modelManager.ensureLoaded("whisper");
       } catch (err) {
-        setVoicePhase("idle", `Whisper load failed: ${String(err.message || err).slice(0, 100)}`);
+        // If Whisper fails to load, fall back immediately to Web Speech so STT still works!
+        sttProvider = "browser";
+        prefs.stt = "browser";
+        applySttProvider();
+        startBrowserListening();
         return;
       }
       await startCloudListening();
       return;
     }
+    // 3) Cloud STT (ElevenLabs / Deepgram): short preflight with 3s timeout, fallback to Web Speech.
     setVoicePhase("thinking", "Checking STT…");
     try {
-      const pf = await voicePreflight(sttProvider);
+      const pf = await Promise.race([
+        voicePreflight(sttProvider),
+        new Promise((_, rej) => setTimeout(() => rej(new Error("preflight timeout")), 3000)),
+      ]);
       const use = pf.use || "browser";
       if (use !== sttProvider && use !== "browser") {
         sttProvider = use;
         onProviderChange();
       }
       if (!pf.ok || use === "browser" || sttProvider === "browser") {
-        if (sttProvider !== "browser") {
-          sttProvider = "browser";
-          onProviderChange();
-          setStatus("Cloud STT unreachable → Web Speech");
-        }
+        sttProvider = "browser";
+        onProviderChange();
         startBrowserListening();
         return;
       }
@@ -909,11 +1137,9 @@ export function createVoice({
         return;
       }
       await startCloudListening();
-    } catch (err) {
-      // Fail closed to browser ASAP.
+    } catch {
       sttProvider = "browser";
       onProviderChange();
-      setVoicePhase("idle", `STT check failed → Web Speech (${String(err.message || err).slice(0, 80)})`);
       startBrowserListening();
     }
   }
@@ -927,19 +1153,20 @@ export function createVoice({
   };
 
   const onMicClick = () => {
-    // Always cut TTS on mic interaction — if only speaking (no extract running), just stop audio.
+    // Cut TTS on mic click (never aborts background dossier extract).
     if (voicePhase === "speaking") {
       stopSpeak();
       clearAwaitingGreeting();
       setVoicePhase("idle");
-      // If dossier extract is NOT running, stopping TTS is all the user wanted.
-      // If extract IS running, fall through so they get the repeat-question warning before recording.
+      // One click: mute the agent and start dictating while extract continues.
+      if (extractBusyInDock && canListen()) startListening();
       return;
     }
     if (voicePhase === "listening") {
       if (sttProvider === "elevenlabs" || sttProvider === "deepgram" || sttProvider === "whisper") {
         stopCloudRecording();
       } else if (activeRecognition) {
+        browserStopRequested = true;
         try { activeRecognition.stop(); } catch { /* ignore */ }
       } else stopVoice();
       return;
@@ -949,9 +1176,7 @@ export function createVoice({
       stopVoice();
       return;
     }
-    // New mic while extract/turn still runs in header — warn then abort.
-    if (confirmInterrupt && !confirmInterrupt()) return;
-    onAbort?.();
+    // Start listening immediately — NEVER abort an in-flight background dossier extract!
     startListening();
   };
 

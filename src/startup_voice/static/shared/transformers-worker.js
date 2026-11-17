@@ -1,9 +1,9 @@
 /**
- * Shared Web Worker hosting Transformers.js pipelines for Whisper STT + LLM.
- * One worker, two slots: whisper (ASR) and llm (text-generation).
+ * Shared Web Worker hosting Transformers.js pipelines for Whisper STT + LLM + TTS.
+ * Slots: whisper (ASR), llm (text-generation), tts (MMS DE/EN).
  *
  * Protocol (main ↔ worker):
- *   { id, type: "check"|"load"|"dispose"|"transcribe"|"generate"|"cancel"|"ping", ... }
+ *   { id, type: "check"|"load"|"dispose"|"transcribe"|"generate"|"synthesize"|"cancel"|"ping", ... }
  *   progress / result / error replies include the same id when applicable.
  */
 import {
@@ -15,32 +15,66 @@ import {
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
-/** @typedef {"whisper"|"llm"} SlotKey */
+/** @typedef {"whisper"|"llm"|"tts"} SlotKey */
+
+const LLM_MODELS = {
+  "granite-3b": {
+    task: "text-generation",
+    modelId: "onnx-community/granite-4.0-micro-ONNX-web",
+    dtype: "q4f16",
+    label: "Granite 4 3B · WebGPU · q4f16",
+  },
+  "gemma-3n-e2b": {
+    task: "text-generation",
+    modelId: "onnx-community/gemma-3n-E2B-it-ONNX",
+    dtype: {
+      embed_tokens: "q4f16",
+      audio_encoder: "q4",
+      vision_encoder: "fp16",
+      decoder_model_merged: "q4f16",
+    },
+    label: "Gemma 3n E2B · WebGPU · q4f16",
+  },
+};
+
+const TTS_MODELS = {
+  de: {
+    task: "text-to-speech",
+    modelId: "Xenova/mms-tts-deu",
+    dtype: "q8",
+    device: "wasm",
+    label: "MMS TTS Deutsch · ~36MB",
+  },
+  en: {
+    task: "text-to-speech",
+    modelId: "Xenova/mms-tts-eng",
+    dtype: "q8",
+    device: "wasm",
+    label: "MMS TTS English · ~36MB",
+  },
+};
 
 const SLOTS = {
   whisper: {
     task: "automatic-speech-recognition",
-    modelId: "onnx-community/whisper-base",
-    dtype: "q4",
-    label: "Whisper Base · WebGPU · q4",
+    modelId: "onnx-community/whisper-tiny",
+    dtype: "q8",
+    device: "wasm",
+    label: "Whisper Tiny · WASM · q8",
   },
-  llm: {
-    task: "text-generation",
-    modelId: "onnx-community/Qwen2.5-1.5B-Instruct",
-    dtype: "q4f16",
-    label: "Qwen2.5-1.5B · WebGPU · q4f16",
-  },
+  llm: { ...LLM_MODELS["granite-3b"] },
+  tts: { ...TTS_MODELS.de },
 };
 
 /** @type {Record<string, any>} */
-const pipes = { whisper: null, llm: null };
+const pipes = { whisper: null, llm: null, tts: null };
 /** @type {Record<string, string>} */
-const states = { whisper: "unloaded", llm: "unloaded" };
+const states = { whisper: "unloaded", llm: "unloaded", tts: "unloaded" };
 /** @type {AbortController|null} */
 let loadAbort = null;
 let genAbort = false;
 /** Tracks whether Cache API already holds model shards (not in RAM). */
-const knownCached = { whisper: false, llm: false };
+const knownCached = { whisper: false, llm: false, tts: false };
 
 async function pickDevice() {
   try {
@@ -97,7 +131,53 @@ async function isModelInBrowserCache(modelId) {
   return false;
 }
 
-async function checkSlot(slot, { id } = {}) {
+async function setTtsModel(modelKey, { id } = {}) {
+  const key = TTS_MODELS[modelKey] ? modelKey : "de";
+  const nextCfg = TTS_MODELS[key];
+  const changed = SLOTS.tts.modelId !== nextCfg.modelId;
+  if (changed && pipes.tts) {
+    try { await pipes.tts.dispose?.(); } catch { /* ignore */ }
+    pipes.tts = null;
+  }
+  SLOTS.tts = { ...nextCfg };
+  if (changed) {
+    const cached = await isModelInBrowserCache(SLOTS.tts.modelId);
+    knownCached.tts = cached;
+    setState("tts", cached ? "cached_idle" : "unloaded");
+  } else {
+    setState("tts", states.tts);
+  }
+  post({ type: "checked", id, slot: "tts", state: states.tts, label: SLOTS.tts.label });
+}
+
+async function setLlmModel(modelKey, { id } = {}) {
+  const key = LLM_MODELS[modelKey] ? modelKey : "granite-3b";
+  const nextCfg = LLM_MODELS[key];
+  const changed = SLOTS.llm.modelId !== nextCfg.modelId;
+  if (changed && pipes.llm) {
+    try { await pipes.llm.dispose?.(); } catch { /* ignore */ }
+    pipes.llm = null;
+  }
+  SLOTS.llm = { ...nextCfg };
+  if (changed) {
+    const cached = await isModelInBrowserCache(SLOTS.llm.modelId);
+    knownCached.llm = cached;
+    setState("llm", cached ? "cached_idle" : "unloaded");
+  } else {
+    setState("llm", states.llm);
+  }
+  post({ type: "checked", id, slot: "llm", state: states.llm, label: SLOTS.llm.label });
+}
+
+async function checkSlot(slot, { id, modelKey } = {}) {
+  if (slot === "llm" && modelKey && LLM_MODELS[modelKey]) {
+    await setLlmModel(modelKey, { id });
+    return;
+  }
+  if (slot === "tts" && modelKey && TTS_MODELS[modelKey]) {
+    await setTtsModel(modelKey, { id });
+    return;
+  }
   if (!SLOTS[slot]) throw new Error(`Unknown slot: ${slot}`);
   if (pipes[slot] && (states[slot] === "ready" || states[slot] === "running")) {
     setState(slot, states[slot] === "running" ? "running" : "ready");
@@ -116,7 +196,23 @@ async function checkSlot(slot, { id } = {}) {
   }
 }
 
-async function loadSlot(slot, { id } = {}) {
+async function loadSlot(slot, { id, modelKey } = {}) {
+  if (slot === "llm" && modelKey && LLM_MODELS[modelKey]) {
+    const nextCfg = LLM_MODELS[modelKey];
+    if (SLOTS.llm.modelId !== nextCfg.modelId && pipes.llm) {
+      try { await pipes.llm.dispose?.(); } catch { /* ignore */ }
+      pipes.llm = null;
+    }
+    SLOTS.llm = { ...nextCfg };
+  }
+  if (slot === "tts" && modelKey && TTS_MODELS[modelKey]) {
+    const nextCfg = TTS_MODELS[modelKey];
+    if (SLOTS.tts.modelId !== nextCfg.modelId && pipes.tts) {
+      try { await pipes.tts.dispose?.(); } catch { /* ignore */ }
+      pipes.tts = null;
+    }
+    SLOTS.tts = { ...nextCfg };
+  }
   if (!SLOTS[slot]) throw new Error(`Unknown slot: ${slot}`);
   if (pipes[slot] && states[slot] === "ready") {
     setState(slot, "ready");
@@ -130,7 +226,7 @@ async function loadSlot(slot, { id } = {}) {
   const signal = loadAbort.signal;
   const cfg = SLOTS[slot];
   setState(slot, "checking_cache");
-  const device = await pickDevice();
+  const device = cfg.device || (await pickDevice());
   const alreadyCached = knownCached[slot] || (await isModelInBrowserCache(cfg.modelId));
   knownCached[slot] = alreadyCached;
 
@@ -261,7 +357,7 @@ async function generateText({ id, system, user, max_tokens = 256, stream = false
     { role: "user", content: String(user || "") },
   ];
   // Browser 1.5B model: cap max_new_tokens so extract doesn't hang for minutes.
-  const cap = stream ? 220 : 600;
+  const cap = stream ? 220 : 900;
   const max_new_tokens = Math.max(32, Math.min(cap, Number(max_tokens) || 200));
 
   try {
@@ -320,6 +416,33 @@ async function generateText({ id, system, user, max_tokens = 256, stream = false
   }
 }
 
+function toFloat32(audio) {
+  if (!audio) return new Float32Array(0);
+  if (audio instanceof Float32Array) return audio;
+  if (audio.data) return toFloat32(audio.data);
+  return new Float32Array(audio);
+}
+
+async function synthesizeSpeech({ id, text, language }) {
+  const lang = String(language || "de").slice(0, 2).toLowerCase() === "en" ? "en" : "de";
+  if (SLOTS.tts.modelId !== TTS_MODELS[lang].modelId || !pipes.tts) {
+    await loadSlot("tts", { modelKey: lang });
+  }
+  await ensureReady("tts");
+  const pipe = pipes.tts;
+  setState("tts", "running");
+  try {
+    const result = await pipe(String(text || ""));
+    const samples = toFloat32(result?.audio);
+    const rate = Number(result?.sampling_rate) || 16000;
+    setState("tts", "ready");
+    post({ type: "speech", id, audio: samples, sampling_rate: rate });
+  } catch (err) {
+    setState("tts", "error", { error: String(err?.message || err) });
+    post({ type: "error", id, slot: "tts", message: String(err?.message || err) });
+  }
+}
+
 async function transcribe({ id, audio, language }) {
   await ensureReady("whisper");
   const pipe = pipes.whisper;
@@ -356,11 +479,11 @@ self.onmessage = async (ev) => {
       return;
     }
     if (type === "check") {
-      await checkSlot(slot, { id });
+      await checkSlot(slot, { id, modelKey: msg.modelKey });
       return;
     }
     if (type === "load") {
-      await loadSlot(slot, { id });
+      await loadSlot(slot, { id, modelKey: msg.modelKey });
       return;
     }
     if (type === "dispose") {
@@ -389,6 +512,14 @@ self.onmessage = async (ev) => {
         user: msg.user,
         max_tokens: msg.max_tokens,
         stream: Boolean(msg.stream),
+      });
+      return;
+    }
+    if (type === "synthesize") {
+      await synthesizeSpeech({
+        id,
+        text: msg.text,
+        language: msg.language,
       });
       return;
     }

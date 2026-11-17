@@ -168,7 +168,7 @@ class DimensionState(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     missing_or_vague: list[str] = Field(default_factory=list)
     status: SlotStatus = "open"
-    # LLM-judged Belege quality 0..1 (concreteness / readability for HTGF). Not keyword hits.
+    # LLM-judged Belege quality 0..1 (concreteness / readability for the analyst). Not keyword hits.
     belege: float = 0.0
     updated_at_turn: int = 0
 
@@ -185,6 +185,7 @@ class StepEvaluation(BaseModel):
     status: SlotStatus = "open"
     missing_fields: list[str] = Field(default_factory=list)
     next_focus_slot: SlotId | None = None
+    next_focus_slots: list[SlotId] = Field(default_factory=list)
     ready_for_closing: bool = False
     slot_coverage: dict[str, float] = Field(default_factory=dict)
     slot_specificity: dict[str, float] = Field(default_factory=dict)

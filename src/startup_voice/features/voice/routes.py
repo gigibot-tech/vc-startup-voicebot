@@ -32,6 +32,15 @@ BUTTON -> BACKEND FLOWS  (browser code: features/voice/ui/voice.js)
 (page load)  app.js boot -> GET /health
     -> health() below: which STT providers have keys; the UI picks a default from it.
 
+[Sprechen] when Settings > Voice mode = "LiveKit"  (browser: features/voice/ui/voice-livekit.js)
+    POST /api/voice/join {mode, session_id, language, voice} -> voice_join() below
+      <- {url, token, room}. The browser joins the LiveKit room; the voice worker
+         (livekit_worker.py, separate process) listens, detects turns and speaks.
+    Transcripts come back over the room's data channel and enter the SAME sendText() path as
+    typing. Reply text goes the other way for the worker's TTS. No LLM call in this file.
+    GET /health -> voice_modes lists the modes Settings may offer; GET /api/voice/transports
+    says why a mode is unavailable.
+
 (no button)  GET /api/sessions/{id}/personaplex-config: headers and tool schema for an external
     PersonaPlex/LiveKit voice agent, whose callbacks land on interview/routes.py tool_webhook().
 """
@@ -45,6 +54,13 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from startup_voice.features.sessions.registry import SessionRegistry
+from startup_voice.features.voice.transports import (
+    TransportUnavailable,
+    available_modes,
+    default_mode,
+    describe_all,
+    get_transport,
+)
 from startup_voice.features.voice import (
     SttError,
     available_providers,
@@ -74,6 +90,16 @@ class VoicePreflightBody(BaseModel):
     check_tts: bool = True
 
 
+class VoiceJoinBody(BaseModel):
+    mode: str = "livekit"
+    session_id: str = Field(min_length=1)
+    language: str = "de"
+    #: tonality from Settings (stability / similarity / speed), handed to the voice worker
+    voice: dict | None = None
+    #: "server" = the worker listens; "browser" = the browser transcribes (local Whisper), worker only speaks
+    stt: str = "server"
+
+
 def build_router(*, registry: SessionRegistry) -> APIRouter:
     router = APIRouter(tags=["voice"])
     stt_router = get_router()
@@ -93,7 +119,32 @@ def build_router(*, registry: SessionRegistry) -> APIRouter:
             "stt": default_provider(),
             "stt_providers": available_providers(),
             "voice_settings": default_voice_settings(),
+            # voice modes the Settings dropdown may offer (classic is always there)
+            "voice_modes": available_modes(),
+            "voice_mode": default_mode(),
         }
+
+    @router.get("/api/voice/transports")
+    def voice_transports() -> dict:
+        """Every voice mode with ``available`` + a ``reason`` when it is not (for Settings)."""
+        return {"default": default_mode(), "transports": describe_all()}
+
+    @router.post("/api/voice/join")
+    def voice_join(body: VoiceJoinBody) -> dict:
+        """[Sprechen] in a non-classic mode - client config to start the call for one session.
+
+        livekit: returns ``{url, token, room}``; the browser joins the room and the separate
+        voice worker is dispatched into it. Still NO LLM here: transcripts come back to the
+        browser, which sends them through the normal turn route.
+        """
+        registry.get(body.session_id)  # 404 for an unknown session
+        try:
+            transport = get_transport(body.mode)
+            return transport.join(
+                session_id=body.session_id, language=body.language, voice=body.voice, stt=body.stt
+            )
+        except TransportUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
 
     @router.post("/api/voice/preflight")
     def voice_preflight(body: VoicePreflightBody) -> dict:
@@ -137,6 +188,10 @@ def build_router(*, registry: SessionRegistry) -> APIRouter:
                 detail = (detail.get("detail") or detail)
                 if isinstance(detail, dict):
                     detail = detail.get("message") or detail.get("code") or detail
+            err_s = str(detail)
+            if "quota" in err_s.lower() or "0 credits" in err_s.lower() or "401" in str(exc):
+                from startup_voice.features.voice.stt import mark_elevenlabs_unavailable
+                mark_elevenlabs_unavailable("quota_exceeded")
             raise HTTPException(502, f"TTS failed: {detail}") from exc
         return Response(content=audio, media_type="audio/mpeg")
 

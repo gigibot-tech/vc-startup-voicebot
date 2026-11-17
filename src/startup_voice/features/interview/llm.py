@@ -113,13 +113,39 @@ _MODEL_CTX_DEFAULTS: tuple[tuple[str, int], ...] = (
     ("llama3.1", 131072),
     ("llama3.2", 131072),
     ("llama3", 8192),
+    ("mistral-small", 131072),  # Scaleway / Mistral cloud: 128k
     ("mistral", 32768),
+    ("gpt-oss", 131072),
     ("qwen2.5", 32768),
     ("qwen", 32768),
     ("gemma2", 8192),
     ("gpt-4o", 128000),
     ("gpt-4", 128000),
 )
+
+
+def fit_ollama_options(
+    *,
+    context_window: int,
+    system: str,
+    user: str,
+    max_tokens: int | None,
+) -> dict[str, Any]:
+    """num_ctx must match the prompt. A model left at Ollama's 4096 default 400s
+    when a full-conversation extract (prompt ~4k tok) also asks for num_predict 2600.
+    """
+    ctx = max(2048, int(context_window))
+    options: dict[str, Any] = {"temperature": 0.2, "num_ctx": ctx}
+    if max_tokens is not None:
+        est_prompt = max(1, (len(system) + len(user)) // 3)
+        room = max(256, ctx - est_prompt - 128)
+        options["num_predict"] = max(64, min(int(max_tokens), room))
+    return options
+
+
+def _ollama_error(resp: httpx.Response) -> RuntimeError:
+    body = (resp.text or "").strip().replace("\n", " ")[:400]
+    return RuntimeError(f"Ollama {resp.status_code} {resp.request.url}: {body}")
 
 
 def resolve_context_window(model: str) -> int:
@@ -213,9 +239,12 @@ class ConfigurableLLM:
     def _ollama(
         self, system: str, user: str, *, max_tokens: int | None, json_mode: bool = False
     ) -> str:
-        options: dict[str, Any] = {"temperature": 0.2}
-        if max_tokens is not None:
-            options["num_predict"] = max_tokens
+        options = fit_ollama_options(
+            context_window=self.context_window,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+        )
         # granite4.x "thinking" often leaves content empty — disable when supported.
         payload: dict[str, Any] = {
             "model": self.model,
@@ -243,7 +272,8 @@ class ConfigurableLLM:
                 if json_mode:
                     gen["format"] = "json"
                 resp = client.post(f"{self.base_url}/api/generate", json=gen)
-                resp.raise_for_status()
+                if resp.status_code >= 400:
+                    raise _ollama_error(resp)
                 body = resp.json()
                 out = str(body.get("response") or "").strip()
                 self._record_meta(
@@ -256,7 +286,8 @@ class ConfigurableLLM:
                     output=out,
                 )
                 return out
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                raise _ollama_error(resp)
             body = resp.json()
             msg = body.get("message") or {}
             content = str(msg.get("content") or "").strip()
@@ -286,9 +317,12 @@ class ConfigurableLLM:
             yield from self._ollama_stream(system, user, max_tokens=max_tokens)
 
     def _ollama_stream(self, system: str, user: str, *, max_tokens: int | None) -> Iterator[str]:
-        options: dict[str, Any] = {"temperature": 0.2}
-        if max_tokens is not None:
-            options["num_predict"] = max_tokens
+        options = fit_ollama_options(
+            context_window=self.context_window,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+        )
         chat_payload: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -312,7 +346,7 @@ class ConfigurableLLM:
                             continue
                     if resp.status_code >= 400:
                         resp.read()
-                    resp.raise_for_status()
+                        raise _ollama_error(resp)
                     acc: list[str] = []
                     done_reason = ""
                     p_tok = 0

@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from startup_voice.domain import InterviewSession
+from startup_voice.domain import InterviewSession, TurnMessage
 from startup_voice.features.interview.pipeline import GREETING, InterviewPipeline
 from startup_voice.features.dossier.scoring import evaluate_session
 from startup_voice.features.sessions.store import FileSessionStore, evaluate_artifact_file
@@ -120,7 +120,7 @@ def test_fill_and_evaluate_writes_objects_and_steps(tmp_path: Path):
     store = FileSessionStore(tmp_path)
     pipe = InterviewPipeline(StubExtractLLM(), store)
     session, greeting = pipe.start_session()
-    assert "HTGF" in greeting or "Analyst" in greeting
+    assert "Analyst" in greeting
 
     session = pipe.process_turn(
         session,
@@ -260,7 +260,7 @@ def test_api_turn_and_webhook(tmp_path: Path, monkeypatch):
     assert patched.json()["slot_questions"]["team"] == "Wer seid ihr?"
     reset = client.post("/api/interview-config/reset")
     assert reset.status_code == 200
-    assert "HTGF" in reset.json()["greeting"] or "Intake" in reset.json()["greeting"]
+    assert "Intake" in reset.json()["greeting"]
     deleted = client.delete(f"/api/sessions/{sid}")
     assert deleted.status_code == 200
     assert client.get(f"/api/sessions/{sid}").status_code == 404
@@ -295,7 +295,7 @@ def test_english_session_uses_english_greeting_reply_prompt_and_summary(tmp_path
     pipe = InterviewPipeline(llm, FileSessionStore(tmp_path))
     session, greeting = pipe.start_session(language="en-US")
     assert session.language == "en"
-    assert greeting.startswith("Hello") and "HTGF" in greeting
+    assert greeting.startswith("Hello") and "intake analyst" in greeting
 
     session = pipe.process_turn(session, "We are two founders.")
     assert "LANGUAGE OVERRIDE" in llm.systems[-1] and "English" in llm.systems[-1]
@@ -527,3 +527,128 @@ def test_prepare_continue_and_commit(tmp_path: Path):
     )
     assert question == "Eine konkrete Nachfrage zum Markt?"
     assert session.messages[-1].content == question
+
+
+def test_fit_ollama_options_keeps_predict_inside_context():
+    from startup_voice.features.interview.llm import fit_ollama_options
+
+    opts = fit_ollama_options(
+        context_window=4096,
+        system="x" * 2000,
+        user="y" * 6000,
+        max_tokens=2600,
+    )
+    est = (2000 + 6000) // 3
+    assert opts["num_ctx"] == 4096
+    assert opts["num_predict"] == 4096 - est - 128
+    assert opts["num_predict"] < 2600
+
+
+def test_build_extract_user_uses_slot_gates_not_ask_now(tmp_path: Path):
+    from startup_voice.features.interview.prompts import build_extract_user, build_slot_gates
+
+    pipe = InterviewPipeline(StubExtractLLM(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    session.messages.append(TurnMessage(role="user", content="Wir sind zwei Gründer Vollzeit."))
+    session.messages.append(TurnMessage(role="assistant", content="Wie steht das Produkt?"))
+    session.messages.append(TurnMessage(role="user", content="MVP live für Unis."))
+    prompt = build_extract_user(session, "MVP live für Unis.", "team", extract_mode="full")
+    assert "SLOT_GATES" in prompt
+    assert "ASK_NOW:" not in prompt
+    assert "NEXT_SLOT" not in prompt
+    assert "Current focus slot" not in prompt
+    gates = build_slot_gates(session)
+    assert [g["slot"] for g in gates] == ["team", "product", "traction", "market", "financing"]
+    assert "look_for" in gates[0]
+
+
+def test_on_demand_extract_focuses_lowest_coverage_gaps(tmp_path: Path):
+    from startup_voice.features.interview.prompts import build_extract_user, build_missing_focus
+
+    pipe = InterviewPipeline(StubExtractLLM(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    session.objects["team"].fields = {
+        "founders_roles": "CEO und CTO",
+        "background_expertise": "SaaS",
+        "commitment_fulltime": "Vollzeit",
+    }
+    session.objects["product"].fields = {
+        "problem_solution": "SaaS für Unis",
+        "stage_status": "MVP live",
+        "usp_tech": "",
+    }
+    session.objects["financing"].fields = {
+        "raise_amount_round": "Seed 1.5M",
+        "use_of_funds": "Sales",
+        "runway_milestones": "18 Monate",
+    }
+    gaps = build_missing_focus(session)
+    assert [g["slot"] for g in gaps] == ["traction", "market", "product"]
+    assert gaps[0]["coverage"] == 0.0
+    assert gaps[-1]["coverage"] == round(2 / 3, 3)
+    assert "usp_tech" in gaps[-1]["missing"]
+    prompt = build_extract_user(session, "irgendwas", "team", full_transcript=True)
+    assert "MISSING_FOCUS" in prompt
+    assert "SLOT_GATES" not in prompt
+    assert '"slot": "team"' not in prompt
+    assert '"slot": "financing"' not in prompt
+    assert prompt.index('"slot": "market"') < prompt.index('"slot": "product"')
+
+
+def test_on_demand_extract_scans_full_conversation(tmp_path: Path):
+    class CaptureLLM(StubExtractLLM):
+        def __init__(self) -> None:
+            self.last_system = ""
+            self.last_user = ""
+
+        def complete(self, system: str, user: str, *, max_tokens: int | None = None) -> str:
+            self.last_system = system
+            self.last_user = user
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    llm = CaptureLLM()
+    pipe = InterviewPipeline(llm, FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    session.messages.extend(
+        [
+            TurnMessage(role="user", content="Wir sind zwei Gründer Vollzeit."),
+            TurnMessage(role="assistant", content="Wie steht das Produkt?"),
+            TurnMessage(role="user", content="MVP live, SaaS für Unis."),
+        ]
+    )
+    pipe.refresh_dossier_extract(session)
+    assert "MISSING_FOCUS" in llm.last_user
+    assert "SLOT_GATES" not in llm.last_user
+    assert "Full conversation transcript" in llm.last_user
+    assert "ASK_NOW:" not in llm.last_user
+    assert "NEXT_SLOT" not in llm.last_user
+    assert "zwei Gründer" in llm.last_user
+    assert "MVP live" in llm.last_user
+    prep = pipe.prepare_extract_only(session)
+    assert "MISSING_FOCUS" in prep["extract_user"]
+    assert "Full conversation transcript" in prep["extract_user"]
+    assert "zwei Gründer" in prep["extract_user"]
+    assert "MVP live" in prep["extract_user"]
+
+
+def test_api_extract_dossier_uses_full_conversation(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    class CaptureLLM(StubExtractLLM):
+        last_user = ""
+
+        def complete(self, system: str, user: str, *, max_tokens: int | None = None) -> str:
+            CaptureLLM.last_user = user
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    client = TestClient(create_app(llm=CaptureLLM()))
+    sid = client.post("/api/sessions").json()["session"]["id"]
+    client.post(f"/api/sessions/{sid}/turn", json={"text": "Wir sind zwei Gründer."})
+    client.post(f"/api/sessions/{sid}/turn", json={"text": "MVP live an drei Unis."})
+    r = client.post(f"/api/sessions/{sid}/extract")
+    assert r.status_code == 200
+    assert r.json()["session"]["id"] == sid
+    assert "MISSING_FOCUS" in CaptureLLM.last_user
+    assert "Full conversation transcript" in CaptureLLM.last_user
+    assert "zwei Gründer" in CaptureLLM.last_user
+    assert "MVP live" in CaptureLLM.last_user

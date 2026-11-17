@@ -1,4 +1,4 @@
-# Demo-Video-Skript — HTGF Startup Voice Intake
+# Demo-Video-Skript — Startup Voice Intake
 
 **Länge:** ~3:00–3:30 (kurz) · optional Cut auf 90s  
 **Setup vor Aufnahme:** `./run.sh` · Ollama + Model · ElevenLabs-Key · Browser http://127.0.0.1:8140/ · frisches Gespräch · Mic getestet · Hero-Layout · Dossier unten · Theme Hell
@@ -24,7 +24,7 @@
 
 ## Voice-over (VO) — durchgängig
 
-> „HTGF Startup Voice Intake — das Erstgespräch als strukturiertes Dossier.  
+> „Startup Voice Intake — das Erstgespräch als strukturiertes Dossier.  
 > Stiften sprechen, das System hört, denkt und schreibt mit — Team, Produkt, Traction, Markt, Finanzierung.  
 > Stimme und KI sind getrennt: das Mikrofon liefert Text, erst der Interview-Agent ruft das Sprachmodell.“
 
@@ -34,9 +34,9 @@
 
 ## Szene 0 — Hook (0:00–0:08)
 
-**Bild:** Hero „Dein Startup / im HTGF Erstgespräch“, Team-Card, leeres Dossier.  
+**Bild:** Hero „Dein Startup / im Erstgespräch“, Team-Card, leeres Dossier.  
 **Aktion:** 1s still halten, dann Cursor auf „Neues Gespräch“.  
-**VO:** „Ein strukturiertes HTGF-Erstgespräch — gesprochen, gespeichert, exportierbar.“
+**VO:** „Ein strukturiertes Erstgespräch — gesprochen, gespeichert, exportierbar.“
 
 ---
 
@@ -121,7 +121,7 @@ Nach jedem Turn: Chat-Bubble streamt → Orb „thinking/speaking“ → Dossier
 ## Szene 6 — Outro (2:30–2:40)
 
 **Bild:** Hero oder fertiges Dossier.  
-**VO:** „HTGF Voice Intake — Erstgespräch als Agent, Dossier als Artefakt. Demo Ende.“
+**VO:** „Voice Intake — Erstgespräch als Agent, Dossier als Artefakt. Demo Ende.“
 
 **Endcard (Text):**
 - `http://127.0.0.1:8140/` (lokal) / interne URL

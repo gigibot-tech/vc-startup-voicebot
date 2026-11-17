@@ -25,7 +25,7 @@ _SUMMARY_LANGUAGE_NAME = {"de": "German", "en": "English"}
 _GREETING = {
     "de": None,  # None = use the configurable greeting from InterviewConfig
     "en": (
-        "Hello, I am your HTGF intake analyst. Tell me in about a minute about your team, "
+        "Hello, I am your intake analyst. Tell me in about a minute about your team, "
         "product status, traction, market and funding needs — I will ask targeted follow-ups."
     ),
 }

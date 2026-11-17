@@ -5,6 +5,11 @@
  *                                 sessions/routes.py)
  * ===================================================================================
  *
+ * [Dossier extrahieren] #dossierExtractBtn (Live Dossier head)
+ *     POST /api/sessions/{id}/extract  (or browser LLM prepare/commit)
+ *     Full conversation, focused on MISSING_FOCUS (open fields, lowest coverage first).
+ *     Runs in parallel with Speak (wait-not-abort via chat.beginExtractWait).
+ *
  * [Dossier abschließen] #finalizeBtn  -> finalize()
  *     confirm() if proposals are still open / the dossier is weak / already closed, then
  *     POST /api/sessions/{id}/finalize   (calls the LLM once, for the spoken summary)
@@ -24,9 +29,11 @@
  */
 
 import { api } from "../../shared/api.js";
+import { modelManager } from "../../shared/model-manager.js";
 import {
-  activeId, activeSession, appState, clearProcessBusy, nav, notify, setLoading, setProcessBusy,
+  activeId, activeSession, appState, clearProcessBusy, isPicker, nav, notify, setLoading, setProcessBusy,
 } from "../../shared/state.js";
+import { isBrowserLlm, prefs } from "../prefs/prefs.js";
 import { t } from "../prefs/chrome-i18n.js";
 import { listProposals } from "./proposals.js";
 import { dossierStats, WEAK_DOSSIER_PCT } from "./render.js";
@@ -40,12 +47,13 @@ export function hasUnsavedDossier(session) {
 }
 
 /**
- * @param {{voice: object, sessions: object, repaintList: () => void}} deps
+ * @param {{voice: object, sessions: object, repaintList: () => void, chat?: object}} deps
  *   voice       - setStatus / setVoicePhase for the status line
  *   sessions    - createSessions() result (goPicker, refreshPicker, ...)
  *   repaintList - repaint sidebar/dropdown without touching the chat
+ *   chat        - beginExtractWait / syncIntakeEnd (speak-during-update)
  */
-export function createDossierActions({ voice, sessions, repaintList }) {
+export function createDossierActions({ voice, sessions, repaintList, chat }) {
   async function finalize({ closeAfter = false, autoFromEnd = false } = {}) {
     const id = activeId();
     const session = activeSession();
@@ -155,6 +163,66 @@ export function createDossierActions({ voice, sessions, repaintList }) {
     sessions.refreshPicker();
   }
 
+  /**
+   * [Dossier extrahieren]: full conversation, focused on open coverage gaps.
+   * Speak / STT stay available; sendText waits for this promise instead of aborting it.
+   */
+  async function extractDossier() {
+    const id = activeId();
+    const s = activeSession();
+    if (isPicker() || !id || !s) return;
+    if (nav.turnBusy || (appState.loading && appState.loadingKind === "turn")) return;
+    if (appState.processBusy?.kind === "extract") return;
+    const seq = nav.seq;
+    const lang = s.language || "de";
+    const done = chat?.beginExtractWait?.();
+    setProcessBusy({ kind: "extract", sessionId: id, message: t("updatingDossier", lang) });
+    voice.setExtractBusy?.(true);
+    const extractBtn = document.getElementById("dossierExtractBtn");
+    if (extractBtn) extractBtn.disabled = true;
+    try {
+      let data;
+      if (isBrowserLlm(prefs.llm)) {
+        await modelManager.ensureLoaded("llm");
+        const prep = await api(`/api/sessions/${id}/extract/prepare`, {
+          method: "POST",
+          body: "{}",
+        });
+        const raw_extract = await modelManager.generateOnce(
+          prep.extract_system,
+          prep.extract_user,
+          Math.min(900, prep.extract_max_tokens || 900),
+          { stream: false },
+        );
+        data = await api(`/api/sessions/${id}/extract/commit`, {
+          method: "POST",
+          body: JSON.stringify({ raw_extract }),
+        });
+      } else {
+        data = await api(`/api/sessions/${id}/extract`, {
+          method: "POST",
+          body: "{}",
+        });
+      }
+      if (nav.isStale(seq, id)) return;
+      if (data?.session) {
+        sessions.applySessionToList(data.session);
+        sessions.patchActiveSession(data.session);
+        void sessions.refreshPicker();
+        chat?.syncIntakeEnd?.(data.session);
+      }
+    } catch (err) {
+      voice.setStatus(String(err?.message || err).slice(0, 120));
+    } finally {
+      done?.();
+      if (extractBtn) extractBtn.disabled = !activeSession();
+      if (appState.processBusy?.sessionId === id && appState.processBusy?.kind === "extract") {
+        clearProcessBusy();
+      }
+      voice.setExtractBusy?.(false);
+    }
+  }
+
   async function deleteSession() {
     const id = activeId();
     if (!id || !activeSession()) return;
@@ -169,7 +237,17 @@ export function createDossierActions({ voice, sessions, repaintList }) {
     document.getElementById("finalizeBtn").addEventListener("click", () => finalize());
     document.getElementById("clearBtn").addEventListener("click", clearDossier);
     document.getElementById("deleteBtn").addEventListener("click", deleteSession);
+    document.getElementById("dossierExtractBtn")?.addEventListener("click", () => {
+      void extractDossier();
+    });
+    document.getElementById("dossierUpdateNowBtn")?.addEventListener("click", (e) => {
+      if (e.currentTarget?.dataset?.act === "finalize") {
+        document.getElementById("finalizeBtn")?.click();
+        return;
+      }
+      void extractDossier();
+    });
   }
 
-  return { finalize, endAndClose, bind };
+  return { finalize, endAndClose, extractDossier, bind };
 }

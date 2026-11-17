@@ -26,6 +26,7 @@ import { activeSession } from "../../shared/state.js";
 import { schema } from "../dossier/dossier-schema.js";
 
 const DEFAULT_FOLLOWUP = "balanced";
+const DEFAULT_EXTRACT_MODE = "full";
 
 /**
  * @param {{sessions?: {patchActiveSession: (s: object) => boolean}}} [deps]
@@ -40,6 +41,7 @@ export function createConfigEditor(deps = {}) {
     config = cfg;
     if (el("greetingInput")) el("greetingInput").value = cfg.greeting || "";
     if (el("systemPromptInput")) el("systemPromptInput").value = cfg.reply_system_prompt || "";
+    if (el("extractModeSelect")) el("extractModeSelect").value = cfg.extract_mode || DEFAULT_EXTRACT_MODE;
     paintFollowupSelect();
     const host = el("catalogFields");
     if (!host) return;
@@ -70,6 +72,7 @@ export function createConfigEditor(deps = {}) {
       reply_system_prompt: el("systemPromptInput")?.value || "",
       slot_questions: questions,
       followup_mode: el("followupModeSelect")?.value || DEFAULT_FOLLOWUP,
+      extract_mode: el("extractModeSelect")?.value || DEFAULT_EXTRACT_MODE,
     };
   }
 
@@ -138,6 +141,9 @@ export function createConfigEditor(deps = {}) {
       } catch (err) {
         flash(el("promptSaveStatus"), String(err.message || err).slice(0, 80));
       }
+    });
+    el("extractModeSelect")?.addEventListener("change", () => {
+      void save("promptSaveStatus");
     });
   }
 

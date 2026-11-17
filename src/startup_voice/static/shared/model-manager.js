@@ -1,14 +1,25 @@
 /**
  * Shared Transformers.js model hub + reusable ModelStatusCard UI.
  *
- * Slots: "whisper" (ASR) and "llm" (text-generation) — one Web Worker for both.
+ * Slots: "whisper" (ASR), "llm" (text-generation), "tts" (MMS DE/EN) — one Web Worker.
  * State machine: unloaded → checking_cache → downloading → warming_up → ready → running → error
  *                cached_idle ↔ ready (Unload RAM / Load into GPU)
  */
 
+const LLM_LABELS = {
+  "granite-3b": "Granite 4 3B · WebGPU · q4f16",
+  "gemma-3n-e2b": "Gemma 3n E2B · WebGPU · q4f16",
+};
+
+const TTS_LABELS = {
+  de: "MMS TTS Deutsch · ~36MB",
+  en: "MMS TTS English · ~36MB",
+};
+
 const SLOT_META = {
-  whisper: { badge: "Whisper Base · WebGPU · q4", task: "STT" },
-  llm: { badge: "Qwen2.5-1.5B · WebGPU · q4f16", task: "LLM" },
+  whisper: { badge: "Whisper Tiny · WASM · q8", task: "STT" },
+  llm: { badge: LLM_LABELS["granite-3b"], task: "LLM" },
+  tts: { badge: TTS_LABELS.de, task: "TTS" },
 };
 
 const STATE_LABEL = {
@@ -48,6 +59,7 @@ function createModelManager() {
   const slotState = {
     whisper: { state: "unloaded", progress: 0, loaded: 0, total: 0, speed: 0, shard: "", error: "", label: SLOT_META.whisper.badge, device: "" },
     llm: { state: "unloaded", progress: 0, loaded: 0, total: 0, speed: 0, shard: "", error: "", label: SLOT_META.llm.badge, device: "" },
+    tts: { state: "unloaded", progress: 0, loaded: 0, total: 0, speed: 0, shard: "", error: "", label: SLOT_META.tts.badge, device: "" },
   };
   /** @type {Set<(slot: string, info: object) => void>} */
   const listeners = new Set();
@@ -109,7 +121,7 @@ function createModelManager() {
         p?.onDelta?.(msg.text || "");
         return;
       }
-      if (msg.type === "generated" || msg.type === "transcript") {
+      if (msg.type === "generated" || msg.type === "transcript" || msg.type === "speech") {
         const p = msg.id && pending.get(msg.id);
         if (p) {
           pending.delete(msg.id);
@@ -117,6 +129,7 @@ function createModelManager() {
         }
         if (msg.type === "generated") notify("llm");
         if (msg.type === "transcript") notify("whisper");
+        if (msg.type === "speech") notify("tts");
         return;
       }
       if (msg.type === "error") {
@@ -167,12 +180,43 @@ function createModelManager() {
     onProcessBanner = fn;
   }
 
+  let activeLlmKey = "granite-3b";
+  let activeTtsKey = "de";
+
+  async function setLlmModelKey(modelKey) {
+    const key = LLM_LABELS[modelKey] ? modelKey : "granite-3b";
+    activeLlmKey = key;
+    SLOT_META.llm.badge = LLM_LABELS[key];
+    slotState.llm.label = LLM_LABELS[key];
+    notify("llm");
+    return call({ type: "check", slot: "llm", modelKey: key });
+  }
+
+  async function setTtsLanguage(lang) {
+    const key = String(lang || "de").toLowerCase().startsWith("en") ? "en" : "de";
+    activeTtsKey = key;
+    SLOT_META.tts.badge = TTS_LABELS[key];
+    slotState.tts.label = TTS_LABELS[key];
+    notify("tts");
+    return call({ type: "check", slot: "tts", modelKey: key });
+  }
+
   async function check(slot) {
-    return call({ type: "check", slot });
+    return call({
+      type: "check",
+      slot,
+      ...(slot === "llm" ? { modelKey: activeLlmKey } : {}),
+      ...(slot === "tts" ? { modelKey: activeTtsKey } : {}),
+    });
   }
 
   async function load(slot) {
-    return call({ type: "load", slot });
+    return call({
+      type: "load",
+      slot,
+      ...(slot === "llm" ? { modelKey: activeLlmKey } : {}),
+      ...(slot === "tts" ? { modelKey: activeTtsKey } : {}),
+    });
   }
 
   async function dispose(slot) {
@@ -259,9 +303,28 @@ function createModelManager() {
   }
 
   /**
+   * @param {string} text
+   * @param {string} [language]
+   * @returns {Promise<{audio: Float32Array, sampling_rate: number}>}
+   */
+  async function synthesize(text, language = "de") {
+    await setTtsLanguage(language);
+    await ensureLoaded("tts");
+    const msg = await call({
+      type: "synthesize",
+      text: String(text || ""),
+      language,
+    });
+    const audio = msg.audio instanceof Float32Array
+      ? msg.audio
+      : new Float32Array(msg.audio || []);
+    return { audio, sampling_rate: Number(msg.sampling_rate) || 16000 };
+  }
+
+  /**
    * Mount a reusable model status card into ``mountEl``.
    * @param {HTMLElement} mountEl
-   * @param {"whisper"|"llm"} slotKey
+   * @param {"whisper"|"llm"|"tts"} slotKey
    */
   function createModelCard(mountEl, slotKey) {
     if (!mountEl || !SLOT_META[slotKey]) return { destroy() {} };
@@ -286,6 +349,7 @@ function createModelManager() {
       </div>`;
     mountEl.appendChild(root);
 
+    const badgeEl = root.querySelector(".model-card__badge");
     const pill = root.querySelector("[data-pill]");
     const progress = root.querySelector(".model-card__progress");
     const bar = root.querySelector("[data-bar]");
@@ -299,6 +363,9 @@ function createModelManager() {
     };
 
     function paint(info) {
+      if (badgeEl && (info?.label || SLOT_META[slotKey]?.badge)) {
+        badgeEl.textContent = info?.label || SLOT_META[slotKey].badge;
+      }
       const st = info?.state || "unloaded";
       let label = STATE_LABEL[st] || st;
       if (st === "downloading") label = `Downloading ${info.progress || 0}%`;
@@ -375,7 +442,7 @@ function createModelManager() {
       src.connect(offline.destination);
       src.start(0);
       const rendered = await offline.startRendering();
-      return rendered.getChannelData(0);
+      return new Float32Array(rendered.getChannelData(0));
     } finally {
       try { await ctx.close(); } catch { /* ignore */ }
     }
@@ -384,12 +451,15 @@ function createModelManager() {
   return {
     subscribe,
     getState,
+    setLlmModelKey,
     check,
     load,
     dispose,
     cancel,
     ensureLoaded,
     transcribe,
+    synthesize,
+    setTtsLanguage,
     runTurn,
     generateOnce,
     createModelCard,

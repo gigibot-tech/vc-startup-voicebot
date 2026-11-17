@@ -18,6 +18,10 @@ from startup_voice.features.interview.prompts import (
 FOLLOWUP_MODES = ("balanced", "insist", "strict")
 DEFAULT_FOLLOWUP_MODE = "balanced"  # UI: „Ausgewogen“
 
+# Dossier extract prompt mode: "full" (default, with transcript) vs "delta" (fast delta-only).
+EXTRACT_MODES = ("full", "delta")
+DEFAULT_EXTRACT_MODE = "full"
+
 
 class InterviewConfig(BaseModel):
     """UI-editable interview brain (not TTS tonality — that stays in prefs)."""
@@ -30,6 +34,8 @@ class InterviewConfig(BaseModel):
     # balanced = current breadth/depth · insist = push for concrete Belege ·
     # strict = one concrete probe per missing/vague field before moving on
     followup_mode: str = DEFAULT_FOLLOWUP_MODE
+    # full = default (Transcript + Latest statement) · delta = fast (only new/changed fields)
+    extract_mode: str = DEFAULT_EXTRACT_MODE
 
     def question_for(self, slot: SlotId) -> str:
         q = (self.slot_questions.get(slot) or "").strip()
@@ -44,11 +50,15 @@ class InterviewConfig(BaseModel):
         mode = (self.followup_mode or "").strip().lower()
         if mode not in FOLLOWUP_MODES:
             mode = DEFAULT_FOLLOWUP_MODE
+        ext_mode = (self.extract_mode or "").strip().lower()
+        if ext_mode not in EXTRACT_MODES:
+            ext_mode = DEFAULT_EXTRACT_MODE
         return InterviewConfig(
             reply_system_prompt=(self.reply_system_prompt or "").strip() or DEFAULT_REPLY_SYSTEM,
             greeting=(self.greeting or "").strip() or DEFAULT_GREETING,
             slot_questions=questions,
             followup_mode=mode,
+            extract_mode=ext_mode,
         )
 
 

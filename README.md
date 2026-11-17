@@ -1,4 +1,4 @@
-# Startup Voice Intake Agent (HTGF)
+# Startup Voice Intake Agent
 
 Web voice agent that runs a structured first conversation with founders and builds a
 step-evaluable dossier (team, product, traction, market, financing). Replies stream into the chat
@@ -44,6 +44,64 @@ The app pings the LLM on startup and refuses to start if it does not answer.
 | `STT_PROVIDER` | auto | `elevenlabs`, `deepgram` or `browser` |
 | `UI_HOST` / `UI_PORT` | `127.0.0.1` / `8140` | where the app listens |
 | `DATA_DIR` | `./data/sessions` | stored conversations (git-ignored) |
+
+### Using an EU cloud LLM instead of local Ollama
+
+Any OpenAI-compatible endpoint works; only three variables change. Example with
+[Scaleway Generative APIs](https://www.scaleway.com/en/generative-apis/) (France, first 1M tokens free):
+
+```bash
+LLM_PROVIDER=openai_compatible
+LLM_BASE_URL=https://api.scaleway.ai/v1
+LLM_MODEL=mistral-small-3.2-24b-instruct-2506
+LLM_API_KEY=<Scaleway secret key>
+```
+
+Pick a **non-reasoning** model: reasoning models (e.g. `gpt-oss-120b`) spend `max_tokens` on hidden
+thinking and can return empty replies. `run.sh` does not check non-Ollama providers; the app pings
+the endpoint on startup and refuses to start if the key or model name is wrong. Interviews contain
+confidential founder data, so check the provider's data-processing terms before real use
+(IONOS and STACKIT process in Germany and do not log prompts).
+
+## Voice modes: classic or LiveKit
+
+Settings → **Voice mode** switches between two interchangeable drivers behind one `voice` object.
+Both hand the transcript to the same `chat.sendText()` path, so the LLM, review gate and dossier
+behave identically.
+
+| | **Classic** (default) | **LiveKit** |
+|---|---|---|
+| Feel | push-to-talk: Sprechen → talk → Stopp | one press starts a hands-free call, talk and interrupt any time |
+| Speech in | Web Speech / Whisper / ElevenLabs / Deepgram, silence timer ends your turn | WebRTC to a worker: VAD + Deepgram/ElevenLabs STT, echo cancellation, tunable turn end |
+| Speech out | MP3 per sentence over HTTP | streamed TTS in the same call, cut instantly when you talk over it |
+| Needs | nothing | a LiveKit server + the worker process |
+
+Setup for LiveKit (the option stays greyed out in Settings until all three values exist):
+
+```bash
+# 1. LiveKit server: LiveKit Cloud project, or locally `livekit-server --dev` (ws://127.0.0.1:7880,
+#    keys devkey / secret). Put the three values in .env:
+#    LIVEKIT_URL=...  LIVEKIT_API_KEY=...  LIVEKIT_API_SECRET=...
+# 2. Start the app as usual, plus the voice worker in a second terminal:
+uv run --extra livekit-voice startup-voice-agent dev
+```
+
+The worker needs `DEEPGRAM_API_KEY` or `ELEVENLABS_API_KEY` (speech-to-text) and
+`ELEVENLABS_API_KEY` (text-to-speech). It never calls the LLM: it forwards what you said and speaks
+the reply text the browser sends it. If the worker is not running, pressing Sprechen shows
+"Voice agent not responding" after 15 s; switch back to Classic in Settings at any time.
+**Browser Whisper in a call:** set Settings → STT to *Whisper (Browser)* and pick LiveKit. The browser
+then listens (energy-based speech detection + your Transformers.js Whisper, mic stays in the browser)
+and the worker only speaks, so no Deepgram/ElevenLabs STT key is needed. Trade-offs: simpler speech
+detection than the server's, a short delay while Whisper transcribes after you stop, first start loads
+the model. Any other STT choice = the worker listens.
+
+Speech-to-text on the worker can also be a **local Whisper server**: run an OpenAI-compatible Whisper server and set
+`LIVEKIT_STT=local`, `LIVEKIT_STT_BASE_URL`, `LIVEKIT_STT_MODEL` (audio stays on your machine; no live
+words while you talk). Tuning (`LIVEKIT_ENDPOINT_MIN`, `LIVEKIT_TURN_DETECTOR`, …) is in `.env.example`.
+
+Adding a third mode = a driver in `features/voice/ui/`, a transport in
+`features/voice/transports/`, one line each in `static/app.js` and `transports/__init__.py`.
 
 ## How it works (voice ≠ AI)
 

@@ -7,19 +7,37 @@ import { prefs } from "../prefs/prefs.js";
 export function sessionClosureLabel(s, { short, lang } = {}) {
   if (!s) return "";
   const de = chromeLang(lang || prefs.lang) === "de";
-  const ready = Boolean(s.evaluation && s.evaluation.ready_for_closing);
-  if (s.finalized && ready) return short ? (de ? "fertig" : "done") : (de ? "fertig (vollständig)" : "done (complete)");
-  if (s.finalized) return short ? (de ? "geschlossen" : "closed") : (de ? "geschlossen (noch Lücken)" : "closed (still gaps)");
-  if (ready) return short ? (de ? "bereit" : "ready") : (de ? "bereit zum Abschluss" : "ready to finalize");
-  return "";
+  const ev = s.evaluation || {};
+  const cov = Math.round(Number(ev.field_coverage || 0) * 100);
+  const ready = Boolean(ev.ready_for_closing || cov >= 100);
+  const vCount = Array.isArray(s.dossier_versions) ? s.dossier_versions.length : 0;
+  if (s.finalized && ready) {
+    const vBit = vCount ? ` v${vCount}` : "";
+    return short
+      ? (de ? `fertig${vBit}` : `complete${vBit}`)
+      : (de ? `vollständig gespeichert${vBit}` : `complete & saved${vBit}`);
+  }
+  if (s.finalized) {
+    return short ? (de ? "geschlossen" : "closed") : (de ? "geschlossen (noch Lücken)" : "closed (still gaps)");
+  }
+  if (ready) {
+    return short ? (de ? "100% komplett" : "100% complete") : (de ? "100% vollständig — bereit zum Speichern" : "100% complete — ready to save");
+  }
+  if (cov >= 85) {
+    return short ? (de ? `${cov}% fast fertig` : `${cov}% almost done`) : (de ? `${cov}% fast vollständig` : `${cov}% almost complete`);
+  }
+  return cov > 0 ? `${cov}%` : "";
 }
 
 /** Closure label for a list entry (GET /api/sessions item). */
 export function listClosureLabel(item, lang) {
   const de = chromeLang(lang || prefs.lang) === "de";
-  if (item.complete) return de ? "fertig" : "done";
+  const cov = Math.round(Number(item.field_coverage || 0) * 100);
+  if (item.complete) return de ? "komplett ✓" : "complete ✓";
   if (item.finalized) return de ? "geschlossen" : "closed";
-  if (item.ready_for_closing) return de ? "bereit" : "ready";
+  if (item.ready_for_closing || cov >= 100) return de ? "100% komplett" : "100% complete";
+  if (cov >= 85) return de ? `${cov}% · fast fertig` : `${cov}% · almost done`;
+  if (cov > 0) return `${cov}%`;
   return "";
 }
 
@@ -79,8 +97,11 @@ export function createSessionListView({ sessionList, homeSessionList, sessionPic
           : busyKind === "turn"
             ? (de ? "antwortet…" : "replying…")
             : (de ? "lädt…" : "loading…");
-      return `<button type="button" class="session-item${item.id === currentId ? " active" : ""}${isBusy ? " is-loading" : ""}" data-id="${esc(item.id)}" ${isBusy ? "aria-busy=\"true\"" : ""}>
-        <span class="t">${esc(fmtTs(item.created_at))}${tag ? ` · ${tag}` : ""}${isBusy ? ` · ${busyLabel}` : ""}</span>
+      const isComplete = Boolean(item.complete || item.ready_for_closing || Number(item.field_coverage || 0) >= 1);
+      const isAlmost = !isComplete && Number(item.field_coverage || 0) >= 0.85;
+      const stageCls = isComplete ? " is-complete" : (isAlmost ? " is-almost" : "");
+      return `<button type="button" class="session-item${item.id === currentId ? " active" : ""}${stageCls}${isBusy ? " is-loading" : ""}" data-id="${esc(item.id)}" ${isBusy ? "aria-busy=\"true\"" : ""}>
+        <span class="t">${esc(fmtTs(item.created_at))}${tag ? ` · <span class="session-item__tag">${esc(tag)}</span>` : ""}${isBusy ? ` · ${busyLabel}` : ""}</span>
         <span class="s">${esc(preview)}</span></button>`;
     }).join("") : `<div class="session-empty">${esc(t("noSessions", lang))}</div>`;
 

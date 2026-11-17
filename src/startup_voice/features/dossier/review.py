@@ -67,7 +67,7 @@ _NOT_MENTIONED_SUMMARY_RE = re.compile(
 def is_prompt_leak(val: str) -> bool:
     """Drop values that are clearly the model echoing the system/transcript prompt."""
     v = val.strip().lower()
-    return v.startswith("transcript so far") or "htgf-intake-analyst" in v[:120]
+    return v.startswith("transcript so far") or "intake-analyst" in v[:120]
 
 
 def is_placeholder_summary(val: str) -> bool:
@@ -135,8 +135,20 @@ def merge_slot_update(
 ) -> None:
     """Apply one extract/tool slot payload through the review gate (+ summary/evidence)."""
     conf_map = payload.get("confidence") if isinstance(payload.get("confidence"), dict) else {}
-    for key, val in (payload.get("fields") or {}).items():
+    raw_fields: dict[str, Any] = {}
+    if isinstance(payload.get("fields"), dict):
+        raw_fields.update(payload["fields"])
+    # Also accept required field keys placed directly on the slot dict (common LLM flattening).
+    for req_key in DIMENSIONS_SPEC[state.slot].required_fields:
+        if req_key not in raw_fields and isinstance(payload.get(req_key), str):
+            raw_fields[req_key] = payload[req_key]
+
+    wrote_any_field = False
+    for key, val in raw_fields.items():
         cleaned = sanitize_field_value(val)
+        # Ignore the model echoing the field name itself (e.g. summary="founders_roles").
+        if cleaned in DIMENSIONS_SPEC[state.slot].required_fields:
+            continue
         if key in state.fields and cleaned and not is_prompt_leak(cleaned):
             raw_c = conf_map.get(key) if conf_map else None
             propose_field_update(
@@ -147,21 +159,136 @@ def merge_slot_update(
                 turn=turn,
                 confidence=_clamp_conf(raw_c) if raw_c is not None else None,
             )
+            wrote_any_field = True
+
+    new_summary = ""
     if payload.get("summary"):
-        summary = sanitize_field_value(payload["summary"])
-        if summary and not is_prompt_leak(summary) and not (
-            state.summary and is_placeholder_summary(summary)
+        cand = sanitize_field_value(payload["summary"])
+        if (
+            cand
+            and cand not in DIMENSIONS_SPEC[state.slot].required_fields
+            and not is_prompt_leak(cand)
+            and not (state.summary and is_placeholder_summary(cand))
         ):
-            state.summary = summary
+            state.summary = cand
+            new_summary = cand
+
     raw_ev = payload.get("evidence")
     ev_items = [raw_ev] if isinstance(raw_ev, str) else (raw_ev if isinstance(raw_ev, list) else [])
+    new_ev_added: list[str] = []
     for item in ev_items:
         text = sanitize_field_value(item)
-        if text and len(text) > 1 and not is_prompt_leak(text) and text not in state.evidence:
+        if (
+            text
+            and len(text) > 1
+            and text not in DIMENSIONS_SPEC[state.slot].required_fields
+            and not is_prompt_leak(text)
+            and not is_placeholder_summary(text)
+            and text not in state.evidence
+        ):
             state.evidence.append(text)
+            new_ev_added.append(text)
+
+    # Guard against the "93% forever" trap on compound fields (e.g. financing.runway_milestones):
+    # When the LLM touches a slot that has ONLY 1 empty field left and writes the founder's
+    # answer into `summary` or `evidence` (e.g. "Runway roughly a quarter or more" / "pilot with
+    # 20 users") while leaving `fields[last_empty] == ""`, fill that single remaining empty field
+    # from `new_summary` or `new_ev_added`.
     req = DIMENSIONS_SPEC[state.slot].required_fields
+    still_empty = [f for f in req if not (state.fields.get(f) or "").strip()]
+    if not wrote_any_field and len(still_empty) == 1:
+        fallback_val = new_summary or (", ".join(new_ev_added) if new_ev_added else "")
+        if fallback_val and not is_placeholder_summary(fallback_val):
+            propose_field_update(
+                state,
+                still_empty[0],
+                fallback_val[:120],
+                source=source,
+                turn=turn,
+                confidence=0.8,
+            )
+
     state.missing_or_vague = [f for f in req if not (state.fields.get(f) or "").strip()]
     state.updated_at_turn = turn
+
+
+# Analyst questions often illustrate the answer ("z.B. Beta-Test, 5 Campus-Gruppen").
+# Granite copies those examples into the field even when evidence quotes the founder.
+_ANALYST_EXAMPLE_MARKERS = (
+    "beta-test",
+    "beta test",
+    "campus-gruppen",
+    "campus gruppen",
+    "gehälter",
+    "gehaelter",
+    "entwicklungstools",
+)
+_FIELD_FOUNDER_HINTS: dict[str, tuple[str, ...]] = {
+    "use_of_funds": ("einstell", "person", "gehalt", "mittel"),
+    "runway_milestones": ("campus", "uni", "jahresende", "tag", "monat", "launch", "meilen"),
+}
+
+
+def _fold_quote(text: str) -> str:
+    return (
+        (text or "")
+        .casefold()
+        .replace("\u2011", "-")
+        .replace("‑", "-")
+        .replace("–", "-")
+    )
+
+
+def _message_blob(session: InterviewSession, role: str) -> str:
+    return _fold_quote("\n".join(m.content for m in session.messages if m.role == role))
+
+
+def echoes_analyst_example(value: str, founder_blob: str, analyst_blob: str) -> bool:
+    """True when the field text is the analyst's example, not the founder's words."""
+    folded = _fold_quote(value)
+    if not folded or folded in founder_blob:
+        return False
+    if folded in analyst_blob:
+        return True
+    return any(
+        mark in folded and mark in analyst_blob and mark not in founder_blob
+        for mark in _ANALYST_EXAMPLE_MARKERS
+    )
+
+
+def best_founder_evidence(field: str, evidence: Any, founder_blob: str) -> str:
+    items = [evidence] if isinstance(evidence, str) else (evidence if isinstance(evidence, list) else [])
+    hints = _FIELD_FOUNDER_HINTS.get(field, ())
+    best = ""
+    best_score = 0
+    for item in items:
+        text = sanitize_field_value(item)
+        folded = _fold_quote(text)
+        if not text or folded not in founder_blob:
+            continue
+        score = sum(1 for hint in hints if hint in folded)
+        if score > best_score:
+            best, best_score = text, score
+    return best[:120]
+
+
+def ground_extract_in_founder(session: InterviewSession, updates: dict[str, Any]) -> None:
+    """Replace analyst-example field values with the founder evidence quote."""
+    founder = _message_blob(session, "user")
+    analyst = _message_blob(session, "assistant")
+    if not founder:
+        return
+    for payload in updates.values():
+        if not isinstance(payload, dict) or not isinstance(payload.get("fields"), dict):
+            continue
+        evidence = payload.get("evidence") or []
+        for key, val in list(payload["fields"].items()):
+            cleaned = sanitize_field_value(val)
+            if not echoes_analyst_example(cleaned, founder, analyst):
+                continue
+            quote = best_founder_evidence(key, evidence, founder)
+            if quote:
+                payload["fields"][key] = quote
 
 
 def apply_extract_updates(
@@ -174,6 +301,7 @@ def apply_extract_updates(
 ) -> list[SlotId]:
     """Postprocess extract: merge touched slots + apply belege map. Returns touched slot ids."""
     touched: list[SlotId] = []
+    ground_extract_in_founder(session, updates)
     for slot in SLOT_ORDER:
         if slot not in updates:
             continue

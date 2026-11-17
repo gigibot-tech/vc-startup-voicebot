@@ -51,7 +51,7 @@ def render_dossier_pdf(session: InterviewSession) -> bytes:
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Noto", "B", 16)
     pdf.set_xy(18, 10)
-    pdf.cell(0, 8, "HTGF Startup Erstgespräch", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 8, "Startup Erstgespräch", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("Noto", size=9)
     pdf.set_x(18)
     pdf.set_text_color(200, 196, 188)

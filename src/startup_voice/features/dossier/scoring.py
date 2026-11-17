@@ -2,7 +2,7 @@
 
 Coverage = share of required fields filled (deterministic).
 Specificity / „Belege %“ = ``DimensionState.belege`` written by the interview LLM
-(extract or refresh) — how concrete and readable the evidence is for an HTGF analyst.
+(extract or refresh) — how concrete and readable the evidence is for an investment analyst.
 
 Call ``refresh_evaluation(session)`` once after dossier mutations (extract / resolve /
 tool / clear). Persistence just writes ``session.evaluation`` — it does not re-score.
@@ -75,22 +75,39 @@ def evaluate_dimension(state: DimensionState) -> tuple[float, float, SlotStatus,
     return coverage, specificity, status, missing
 
 
+def pick_next_focus_slots(
+    *,
+    coverages: dict[str, float],
+    statuses: dict[str, SlotStatus],
+) -> tuple[SlotId, ...]:
+    """Return ordered tuple of focus slots (breadth first, then partial, then non-solid).
+
+    Can be size 0 (all solid), size 1 (only one slot left), or up to size 5:
+      1) Empty slots      (slot_coverage == 0.0 -> 0/3 fields filled)
+      2) Incomplete slots (0.0 < slot_coverage < 1.0 -> 1/3 or 2/3 fields filled)
+      3) Non-solid slots  (coverage == 1.0 but specificity < 0.34 or missing_or_vague)
+    """
+    ordered: list[SlotId] = []
+    for slot in SLOT_ORDER:
+        if coverages.get(slot, 0) <= 0 and statuses.get(slot) != "solid":
+            ordered.append(slot)
+    for slot in SLOT_ORDER:
+        if slot not in ordered and coverages.get(slot, 0) < 1.0:
+            ordered.append(slot)
+    for slot in SLOT_ORDER:
+        if slot not in ordered and statuses.get(slot) != "solid":
+            ordered.append(slot)
+    return tuple(ordered)
+
+
 def pick_next_focus(
     *,
     coverages: dict[str, float],
     statuses: dict[str, SlotStatus],
 ) -> SlotId | None:
-    """Breadth-first: empty slots first, then incomplete fields, then quality deepen."""
-    for slot in SLOT_ORDER:
-        if coverages.get(slot, 0) <= 0 and statuses.get(slot) != "solid":
-            return slot
-    for slot in SLOT_ORDER:
-        if coverages.get(slot, 0) < 1.0:
-            return slot
-    for slot in SLOT_ORDER:
-        if statuses.get(slot) != "solid":
-            return slot
-    return None
+    """First slot in ``pick_next_focus_slots`` (or None when all 5 slots are solid)."""
+    slots = pick_next_focus_slots(coverages=coverages, statuses=statuses)
+    return slots[0] if slots else None
 
 
 def evaluate_session(session: InterviewSession) -> StepEvaluation:
@@ -112,13 +129,15 @@ def evaluate_session(session: InterviewSession) -> StepEvaluation:
     avg_cov = sum(coverages.values()) / len(SLOT_ORDER)
     avg_spec = sum(specs) / len(specs) if specs else 0.0
     ready = all(statuses[s] == "solid" for s in SLOT_ORDER)
-    next_slot = None if ready else pick_next_focus(coverages=coverages, statuses=statuses)
+    focus_tuple = () if ready else pick_next_focus_slots(coverages=coverages, statuses=statuses)
+    next_slot = focus_tuple[0] if focus_tuple else None
     return StepEvaluation(
         field_coverage=round(avg_cov, 3),
         evidence_specificity=round(avg_spec, 3),
         status="solid" if ready else ("partial" if avg_cov > 0 else "open"),
         missing_fields=missing,
         next_focus_slot=next_slot,
+        next_focus_slots=list(focus_tuple),
         ready_for_closing=ready,
         slot_coverage=coverages,
         slot_specificity=specificities,

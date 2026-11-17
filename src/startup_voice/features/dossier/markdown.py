@@ -13,7 +13,7 @@ from startup_voice.domain import (
 
 def render_dossier_markdown(session: InterviewSession) -> str:
     lines = [
-        "# HTGF Startup Erstgespräch",
+        "# Startup Erstgespräch",
         "",
         f"_Session `{session.id}` · {session.created_at}_",
         "",

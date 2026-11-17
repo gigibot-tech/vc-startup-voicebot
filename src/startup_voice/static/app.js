@@ -15,10 +15,13 @@
 import { api } from "./shared/api.js";
 import { modelManager } from "./shared/model-manager.js";
 import {
-  appState, activeId, activeSession, clearProcessBusy, confirmInterruptProcess, isPicker, nav,
+  appState, activeId, activeSession, clearProcessBusy, confirmInterruptProcess, isPicker,
   setProcessBusy, subscribe,
 } from "./shared/state.js";
 import { createVoice } from "./features/voice/voice.js";
+import { createLiveKitVoice } from "./features/voice/voice-livekit.js";
+import { createVoiceSwitch } from "./features/voice/voice-mode.js";
+import { createMicListener, resampleTo16k } from "./features/voice/browser-listen.js";
 import { prefs, savePrefs } from "./features/prefs/prefs.js";
 import { createSettings } from "./features/prefs/settings.js";
 import { createSessions, readUrlSessionId, syncUrl } from "./features/sessions/lifecycle.js";
@@ -55,16 +58,48 @@ const currentLanguage = () => activeSession()?.language || prefLanguage();
  *
  * Change what happens after speech HERE — not inside voice.js.
  */
-const voice = createVoice({
+const voiceDeps = {
   prefs,
-  textInput,
   getLanguage: currentLanguage,
   canListen: () => !isPicker() && Boolean(activeSession()),
   onTranscript: (text) => chat.sendText(text),
-  onProviderChange: () => showMeta(),
   // Mic during thinking / cancel: abort the in-flight turn SSE (shows Wiederholen).
-  onAbort: () => chat.abortTurn(),
+  // Speak during dossier extract must NOT abort Call #2.
+  onAbort: () => chat.abortTurn({ keepExtract: true }),
   confirmInterrupt: () => confirmInterruptProcess(currentLanguage()),
+};
+
+/*
+ * VOICE MODES — two interchangeable drivers behind ONE `voice` object (voice-mode.js):
+ *   classic  push-to-talk in the browser (voice.js)      always available, the fallback
+ *   livekit  hands-free call with a server voice worker  (voice-livekit.js; needs LIVEKIT_* in .env)
+ * Both end in the same onTranscript -> chat.sendText path. The mode is Settings > Voice mode
+ * (prefs.voiceMode); "" follows the server's VOICE_MODE. Everything below talks to `voice` only.
+ */
+const classicVoice = createVoice({
+  ...voiceDeps,
+  textInput,
+  onProviderChange: () => showMeta(),
+});
+const livekitVoice = createLiveKitVoice({
+  ...voiceDeps,
+  api,
+  base: classicVoice,
+  getSessionId: activeId,
+  // Settings > STT = "Whisper (Browser)": in a call the browser transcribes (local Transformers.js
+  // Whisper) and the worker only speaks. Any other STT choice: the worker listens.
+  browserStt: {
+    isEnabled: () => prefs.stt === "whisper",
+    prepare: () => modelManager.ensureLoaded("whisper"),
+    createListener: createMicListener,
+    transcribe: (samples, rate, lang) => modelManager.transcribe(resampleTo16k(samples, rate), lang),
+  },
+});
+let serverVoiceMode = "classic";
+const voice = createVoiceSwitch({
+  drivers: { classic: classicVoice, livekit: livekitVoice },
+  getPreferred: () => prefs.voiceMode,
+  getServerDefault: () => serverVoiceMode,
 });
 
 const sessions = createSessions({
@@ -88,7 +123,9 @@ const settings = createSettings({
   },
 });
 const proposals = createProposals({ voice, sessions });
-const dossierActions = createDossierActions({ voice, sessions, repaintList: () => renderListUi() });
+const dossierActions = createDossierActions({
+  voice, sessions, chat, repaintList: () => renderListUi(),
+});
 
 const sessionListView = createSessionListView({
   sessionList: $("sessionList"),
@@ -111,15 +148,75 @@ function paintProcessBanner() {
   // Sync the inline notice right under "Live dossier / Session … · Turn N"
   const dosUpd = $("dossierUpdating");
   const dosUpdText = $("dossierUpdatingText");
+  const dosUpdBtn = $("dossierUpdateNowBtn");
+  const s = activeSession();
+  const focusSlots = Array.isArray(s?.evaluation?.next_focus_slots)
+    ? s.evaluation.next_focus_slots
+    : [];
+  const missingCount = Array.isArray(s?.evaluation?.missing_fields)
+    ? s.evaluation.missing_fields.length
+    : 0;
+  const isComplete100 = Boolean(
+    s
+    && (s.evaluation?.ready_for_closing
+      || Number(s.evaluation?.field_coverage || 0) >= 1
+      || missingCount === 0),
+  );
+  const isAlmostDone = Boolean(
+    s
+    && !s.finalized
+    && !isComplete100
+    && (focusSlots.length === 1 || (missingCount >= 1 && missingCount <= 2)),
+  );
   const isExtractingThisSession = Boolean(
     p && p.kind === "extract" && (!activeId() || p.sessionId === activeId()),
   );
   if (dosUpd) {
-    dosUpd.hidden = !isExtractingThisSession;
-    if (isExtractingThisSession && dosUpdText) {
-      dosUpdText.textContent = de
-        ? "Dossier wird gerade aktualisiert — am besten kurz warten, bevor Sie weitersprechen/senden (sonst stellt der Agent evtl. dieselbe Frage erneut)."
-        : "Updating dossier right now — best wait a moment before speaking or sending (interrupting may cause the agent to ask the same question again).";
+    if (isExtractingThisSession) {
+      dosUpd.hidden = false;
+      dosUpd.dataset.mode = "updating";
+      if (dosUpdBtn) dosUpdBtn.hidden = true;
+      if (dosUpdText) {
+        const soonBit = isAlmostDone
+          ? (de ? " · Fast fertig (letztes offenes Feld)!" : " · Almost done (final open topic)!")
+          : "";
+        dosUpdText.textContent = (de
+          ? "Dossier wird im Hintergrund aktualisiert — Sie können schon weitersprechen (neue Antwort wartet automatisch kurz aufs Update)"
+          : "Updating dossier in background — feel free to speak now (your next reply waits automatically for the update)")
+          + soonBit;
+      }
+    } else if (isComplete100) {
+      dosUpd.hidden = false;
+      dosUpd.dataset.mode = "complete";
+      const vCount = Array.isArray(s?.dossier_versions) ? s.dossier_versions.length : 0;
+      if (dosUpdText) {
+        dosUpdText.textContent = de
+          ? `100% vollständig — Dossier bereit zum Speichern (v${vCount + 1}) oder Abschließen.`
+          : `100% complete — dossier is ready to save (v${vCount + 1}) or wrap up.`;
+      }
+      if (dosUpdBtn) {
+        dosUpdBtn.hidden = false;
+        dosUpdBtn.textContent = de ? `Als v${vCount + 1} speichern` : `Save as v${vCount + 1}`;
+        dosUpdBtn.dataset.act = "finalize";
+      }
+    } else if (isAlmostDone) {
+      dosUpd.hidden = false;
+      dosUpd.dataset.mode = "almost-done";
+      const lastSlot = focusSlots[0] || "";
+      if (dosUpdText) {
+        dosUpdText.textContent = de
+          ? `Fast fertig — nur noch 1 Bereich offen (${lastSlot || `${missingCount} Feld`}). Nach dieser Antwort ist das Dossier bereit zum Abschließen.`
+          : `Almost done — only 1 topic left (${lastSlot || `${missingCount} field`}). After this answer your dossier is ready to wrap up.`;
+      }
+      if (dosUpdBtn) {
+        dosUpdBtn.hidden = false;
+        dosUpdBtn.textContent = de ? "Dossier aktualisieren" : "Update dossier";
+        dosUpdBtn.dataset.act = "extract";
+      }
+    } else {
+      dosUpd.hidden = true;
+      if (dosUpdBtn) dosUpdBtn.hidden = true;
+      delete dosUpd.dataset.mode;
     }
   }
 
@@ -193,8 +290,8 @@ function syncComposerBusy() {
       hint.hidden = false;
       delete hint.dataset.live;
       hint.textContent = de
-        ? "Dossier wird aktualisiert — am besten kurz warten (Sprechen/Senden jetzt fragt vor dem Abbruch nach)."
-        : "Updating dossier — best wait a moment (speaking/sending now will ask before interrupting).";
+        ? "Dossier aktualisiert im Hintergrund — Sie können bereits sprechen oder schreiben."
+        : "Updating dossier in background — you can already speak or type.";
     } else {
       hint.hidden = true;
       delete hint.dataset.live;
@@ -269,6 +366,7 @@ function renderView() {
 subscribe(() => {
   syncUrl();
   renderView();
+  voice.onSessionChange(); // a live call belongs to ONE session: end it when the session changes
 });
 
 // Sync model download / warm-up progress into the topbar process banner.
@@ -289,7 +387,8 @@ modelManager.setProcessBannerHook((info) => {
 
 /** Load labels, settings and sessions, then open the right screen. */
 async function boot() {
-  // Paint picker immediately so Start new chat is never stuck hidden before network returns.
+  // Capture ?s=<id> BEFORE goPicker() (goPicker triggers syncUrl which strips ?s=).
+  const initialUrlSessionId = readUrlSessionId();
   sessions.goPicker({ status: "Loading sessions…" });
   try {
     await loadDossierSchema();
@@ -300,23 +399,25 @@ async function boot() {
         ? health.stt_providers
         : [health.stt || "browser"]);
       if (prefs.stt === "auto" || !prefs.stt) {
-        // Prefer cloud STT from health; otherwise Whisper (browser) over Web Speech.
         const server = health.stt;
         prefs.stt = (server && server !== "browser") ? server : voice.resolveSttProvider();
         savePrefs();
       }
       voice.applySttProvider();
       settings.syncToneUi();
+      serverVoiceMode = health.voice_mode || "classic";
+      voice.setAvailableModes(health.voice_modes);
+      void settings.syncVoiceModeUi();
     } catch {
       voice.setProviders(["browser"]);
       if (prefs.stt === "auto" || !prefs.stt) {
-        prefs.stt = "whisper";
+        prefs.stt = "browser";
         savePrefs();
       }
       voice.applySttProvider();
     }
     const list = await sessions.refreshPicker();
-    const fromUrl = readUrlSessionId();
+    const fromUrl = initialUrlSessionId || readUrlSessionId();
     if (fromUrl && list.some((item) => item.id === fromUrl)) await sessions.openSession(fromUrl);
     else sessions.goPicker();
   } catch (err) {

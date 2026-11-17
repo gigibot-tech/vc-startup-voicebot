@@ -58,6 +58,7 @@ from startup_voice.features.interview.prompts import (
     DEFAULT_GREETING,
     DEFAULT_REPLY_SYSTEM,
     DEFAULT_SLOT_QUESTIONS,
+    EXTRACT_DELTA_SYSTEM,
     EXTRACT_SYSTEM,
     SCORE_BELEGE_SYSTEM,
     SUMMARY_SYSTEM,
@@ -306,13 +307,15 @@ class InterviewPipeline:
             focus = self._begin_user_turn(session, user_text)
         ask = (session.evaluation.next_focus_slot if session.evaluation else None) or focus
         reply_system, reply_user = self._preprocess_reply(session, user_text, ask)
-        extract_user = build_extract_user(session, user_text, focus)
+        ext_mode = (self.config().extract_mode or "full").strip().lower()
+        extract_sys = EXTRACT_DELTA_SYSTEM if ext_mode == "delta" else EXTRACT_SYSTEM
+        extract_user = build_extract_user(session, user_text, focus, extract_mode=ext_mode)
         self._store.save(session)
         return {
             "focus": focus,
             "reply_system": reply_system,
             "reply_user": reply_user,
-            "extract_system": EXTRACT_SYSTEM,
+            "extract_system": extract_sys,
             "extract_user": extract_user,
             "reply_max_tokens": reply_token_budget(user_text),
             "extract_max_tokens": extract_token_budget(user_text),
@@ -395,10 +398,14 @@ class InterviewPipeline:
     def stream_turn(self, session: InterviewSession, user_text: str) -> Iterator[Any]:
         """Yield reply chunks → ReplyDone → EXTRACT_PHASE → persist.
 
-        Thinking/reply always first; dossier extract always runs after the reply unlocks.
+        Two sequential LLM calls per turn:
+          • Call #1 (REPLY)   : build_reply_prompt() -> stream() tokens -> ReplyDone (TTS starts)
+          • Call #2 (EXTRACT) : EXTRACT_SYSTEM + build_extract_user() -> complete(json_mode=True)
         """
         focus = self._begin_user_turn(session, user_text)
         ask = (session.evaluation.next_focus_slot if session.evaluation else None) or focus
+
+        # ── CALL #1: Spoken analyst reply (streamed to chat bubble + TTS) ──────
         system, user = self._preprocess_reply(session, user_text, ask)
         budget = reply_token_budget(user_text)
         stream = getattr(self._llm, "stream", None)
@@ -424,8 +431,10 @@ class InterviewPipeline:
             TurnMessage(role="assistant", content=reply, warning=self._last_llm_warning())
         )
         self._store.save(session)
-        # Always extract after reply — UI: Thinking… → reply → Updating dossier…
+        # Unlock UI & start TTS before Call #2 begins.
         yield ReplyDone(reply=reply, needs_extract=True, offer_end=offer_end)
+
+        # ── CALL #2: Silent 5-slot JSON dossier extraction ─────────────────────
         yield EXTRACT_PHASE
         updated, eval_result = self._run_extract(session, user_text, focus=focus)
         ext_warn = self._last_llm_warning()
@@ -438,19 +447,79 @@ class InterviewPipeline:
             session, user_text, updated, eval_result, reply, append_reply=False
         )
 
+    def refresh_dossier_extract(self, session: InterviewSession) -> InterviewSession:
+        """On-demand extract: full conversation, focused on open coverage gaps."""
+        user_turns = [m.content.strip() for m in session.messages if m.role == "user" and (m.content or "").strip()]
+        founder_text = "\n".join(user_turns)
+        if not founder_text:
+            refresh_evaluation(session)
+            self._store.save(session)
+            return session
+        updated, eval_result = self._run_extract(
+            session, founder_text, focus="team", full_transcript=True
+        )
+        reply = next(
+            (m.content for m in reversed(session.messages) if m.role == "assistant"),
+            "",
+        )
+        return self._persist_turn(
+            session, founder_text, updated, eval_result, reply, append_reply=False
+        )
+
+    def prepare_extract_only(self, session: InterviewSession) -> dict[str, Any]:
+        """Return MISSING_FOCUS + full-transcript prompts for on-demand browser extract."""
+        user_turns = [m.content.strip() for m in session.messages if m.role == "user" and (m.content or "").strip()]
+        founder_text = "\n".join(user_turns)
+        extract_user = build_extract_user(
+            session, founder_text, "team", extract_mode="full", full_transcript=True
+        )
+        return {
+            "focus": "team",
+            "extract_system": EXTRACT_SYSTEM,
+            "extract_user": extract_user,
+            "extract_max_tokens": extract_token_budget(extract_user),
+        }
+
+    def commit_extract_only(self, session: InterviewSession, raw_extract: str) -> InterviewSession:
+        """Apply raw extract JSON from on-demand browser LLM dossier extraction."""
+        user_turns = [m.content.strip() for m in session.messages if m.role == "user" and (m.content or "").strip()]
+        founder_text = "\n".join(user_turns)
+        updates, belege = _parse_extract(raw_extract)
+        touched = apply_extract_updates(
+            session, updates, belege, turn=session.turn_index, source="chat"
+        )
+        eval_result = refresh_evaluation(session)
+        reply = next(
+            (m.content for m in reversed(session.messages) if m.role == "assistant"),
+            "",
+        )
+        return self._persist_turn(
+            session, founder_text, touched, eval_result, reply, append_reply=False
+        )
+
     def _run_extract(
         self,
         session: InterviewSession,
         user_text: str,
         *,
         focus: SlotId = "team",
+        full_transcript: bool = False,
     ) -> tuple[list[SlotId], StepEvaluation]:
-        """LLM extract into dossier (every turn after reply)."""
-        user = build_extract_user(session, user_text, focus)
+        """LLM extract into dossier (every turn after reply, or on-demand full scan)."""
+        ext_mode = "full" if full_transcript else (self.config().extract_mode or "full").strip().lower()
+        extract_sys = EXTRACT_DELTA_SYSTEM if ext_mode == "delta" else EXTRACT_SYSTEM
+        user = build_extract_user(
+            session,
+            user_text,
+            focus,
+            extract_mode=ext_mode,
+            full_transcript=full_transcript,
+        )
+        budget_src = user if full_transcript else user_text
         raw = self._complete(
-            EXTRACT_SYSTEM,
+            extract_sys,
             user,
-            max_tokens=extract_token_budget(user_text),
+            max_tokens=extract_token_budget(budget_src),
             json_mode=True,
         )
         updates, belege = _parse_extract(raw)

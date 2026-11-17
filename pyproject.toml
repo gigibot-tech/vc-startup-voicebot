@@ -1,7 +1,7 @@
 [project]
 name = "startup-voice-agent"
 version = "0.1.0"
-description = "HTGF-style voice intake agent for structured startup first conversations"
+description = "Voice intake agent for structured startup first conversations"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -24,9 +24,18 @@ livekit = [
     "livekit-agents>=1.5",
     "livekit-plugins-nvidia[personaplex]",
 ]
+# Hands-free voice mode: the worker process (startup-voice-agent), see features/voice/livekit_worker.py
+livekit-voice = [
+    "livekit-agents>=1.8",
+    "livekit-plugins-silero>=1.8",
+    "livekit-plugins-deepgram>=1.8",
+    "livekit-plugins-elevenlabs>=1.8",
+    "livekit-plugins-openai>=1.8",
+]
 
 [project.scripts]
 startup-voice = "startup_voice.web:main"
+startup-voice-agent = "startup_voice.features.voice.livekit_worker:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,4 +1,4 @@
-# Startup Voice Intake (HTGF)
+# Startup Voice Intake
 
 Web voice agent that runs a structured first conversation with founders and stores
 a step-evaluable dossier under `data/sessions/<id>/`.
@@ -29,25 +29,29 @@ module documents which button triggers which backend flow.
 
 ## Voice modes
 
+Two drivers behind one `voice` object (`voice/ui/voice-mode.js`): **classic** and **livekit**. Server side each is a `VoiceTransport` (`voice/transports/`); `/health` lists the usable ones.
+
 | Mode | Transport | Notes |
 |------|-----------|-------|
 | **Shipped** | **ElevenLabs STT** (Scribe, same API key) / **Whisper (Transformers.js)** / Deepgram / Web Speech + **ElevenLabs TTS** | Mic → cloud `/api/stt` or in-browser Whisper → turn; TTS with tonality (stability/similarity/style/speed) |
-| Bridge only | PersonaPlex helpers in `features/voice/bridge.py` | `/personaplex-config` + tool-webhook exist; **no LiveKit/GPU client in UI** — missing mode is not a `.env` gap |
-| Planned | LiveKit agent process | Needs GPU PersonaPlex server + room join |
+| **LiveKit** (opt-in) | Hands-free WebRTC call; worker `features/voice/livekit_worker.py` does VAD + STT + TTS | Settings > Voice mode. Browser driver `voice/ui/voice-livekit.js`, token route `POST /api/voice/join`, wire protocol `voice/livekit_protocol.py`. The worker never calls the LLM; the browser stays the orchestrator |
+| Bridge only | PersonaPlex helpers in `features/voice/bridge.py` | `/personaplex-config` + tool-webhook exist; speech-to-speech needs a GPU PersonaPlex server and has no UI client |
 
 ## Browser WebGPU (Transformers.js)
 
 Settings (`#prefsBar`):
 - **STT** `#sttSel`: `elevenlabs` | `whisper` | `deepgram` | `browser`
-- **LLM** `#llmSel`: `ollama` (server, default) | `transformers` (browser WebGPU)
+- **TTS** `#ttsSel`: `local` (default, downloadable MMS DE/EN via Transformers.js) | `browser` (Web Speech) | `elevenlabs`
+- **LLM** `#llmSel`: `ollama` (server, default) | `granite-3b` (Granite 4 3B WebGPU) | `gemma-3n-e2b` (Gemma 3n E2B Nano Mobile WebGPU)
 
-When `llm=transformers`, chat uses the same loaded `text-generation` pipeline for Call #1 (spoken reply) and Call #2 (5-slot JSON extract):
+When `llm` is `granite-3b` or `gemma-3n-e2b`, chat uses the same loaded `text-generation` pipeline for Call #1 (spoken reply) and Call #2 (5-slot JSON extract):
 
 1. `POST /api/sessions/{id}/turn/prepare` → `{reply_system, reply_user, extract_system, extract_user, …}`
-2. Worker runs reply (streamed) then extract on `onnx-community/Qwen2.5-1.5B-Instruct` (`q4f16`)
-3. `POST /api/sessions/{id}/turn/commit` `{raw_reply, raw_extract}` → same review/score gate as server turns
+2. Worker runs reply (streamed) then extract on `onnx-community/granite-4.0-micro-ONNX-web` (`q4f16`) or `onnx-community/gemma-3n-E2B-it-ONNX` (`q4f16`)
+3. `POST /api/sessions/{id}/turn/reply` saves Call #1 immediately; `POST /api/sessions/{id}/turn/commit` `{raw_reply, raw_extract}` runs the dossier review/score gate
+4. **Speaking during dossier update:** Clicking `Sprechen` while Call #2 (`Updating dossier…`) is still running starts recording immediately without aborting the background extract; if the new utterance is submitted before Call #2 finishes, `sendText()` awaits `inFlightExtractPromise` so the new reply always uses the freshly updated dossier.
 
-Whisper STT uses `onnx-community/whisper-base` via the shared worker + reusable `ModelStatusCard` (`static/shared/model-manager.js`, `transformers-worker.js` on `@huggingface/transformers@4`). Download progress syncs to `#processBanner`. Whisper is the default STT fallback when no cloud keys are configured. Continue-asking has matching `/continue/prepare` + `/continue/commit`.
+Whisper STT uses `onnx-community/whisper-tiny` via the shared worker + reusable `ModelStatusCard` (`static/shared/model-manager.js`, `transformers-worker.js` on `@huggingface/transformers@4`). Local TTS (default) uses `Xenova/mms-tts-deu` / `Xenova/mms-tts-eng` on the same worker. Download progress syncs to `#processBanner`. Whisper is the default STT fallback when no cloud keys are configured. Continue-asking has matching `/continue/prepare` + `/continue/commit`.
 
 ### Voice UX
 - Phases: **listening → thinking → speaking → idle** (orb + status). Sending a turn clears listening/speaking immediately so UI does not stick on “Speaking…/Listening…”.
@@ -58,9 +62,10 @@ Whisper STT uses `onnx-community/whisper-base` via the shared worker + reusable 
 UI session picker loads `GET /api/sessions` and resumes `session.json` from disk.
 
 ### Default layout
-- **Main = HTGF Hero** (team card + „Dein Startup / Erstgespräch“ — earlier look); **Sprechen** only once a session is open (above conflicts)
+- **Main = Hero** (team card + „Dein Startup / Erstgespräch“ — earlier look); **Sprechen** only once a session is open (above conflicts)
 - Optional Main = Compact Chat
-- **Nav oben** + **Dossier unter dem Chat** (rounded card in Hero mode)
+- **Nav oben, eine Zeile** — STT-Badge versteckt; **Neues Gespräch** in der Sidebar; Gespräch-Dropdown nur bei eingeklappter Sidebar und wenn die Zeile nicht überläuft (unter 720px immer weg)
+- **Dossier unter dem Chat** (rounded card in Hero mode)
 - Optional: Nav links / Dossier rechts
 - **Gespräch löschen** → `DELETE /api/sessions/{id}` (chat + files)
 - **Dossier leeren** → clear slots only
@@ -86,6 +91,7 @@ Persistenz: `data/sessions/interview_config.json` (Server-SSOT für Prompt + Kat
 ### Dossier actions
 | Button | Meaning |
 |--------|---------|
+| Dossier extrahieren | Full-conversation extract focused on **MISSING_FOCUS** (open fields, lowest coverage first — not all 5 slots equally, not ASK_NOW). Live Dossier `#dossierExtractBtn` |
 | Dossier abschließen | Finalize with warnings; then chat Auswahl |
 | Markdown / PDF / JSON | Export readable MD, print PDF, or raw `session.json` |
 | Field labels | UI + exports use German labels from `DIMENSIONS_SPEC.field_labels` (no snake_case) |
@@ -126,5 +132,5 @@ cd webapps/startup-voice-agent
 
 ## Design
 
-HTGF Jan-Bernhardt tokens: fond `#F0EEEB`, berry/mint/lime accents, asymmetric
+Design tokens: fond `#F0EEEB`, berry/mint/lime accents, asymmetric
 `team-qa` bubbles, glass header, pill buttons.

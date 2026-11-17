@@ -69,6 +69,10 @@ class CommitContinueBody(BaseModel):
     raw_reply: str = Field(min_length=1)
 
 
+class CommitExtractBody(BaseModel):
+    raw_extract: str = ""
+
+
 def _sse(event: str, data: dict) -> str:
     """One Server-Sent Event: "event:" + "data:" lines, terminated by a BLANK line."""
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -326,6 +330,52 @@ def build_router(
             raise HTTPException(502, f"Continue commit failed: {exc}") from exc
         registry.put(session)
         return {"session": session.model_dump(), "reply": question}
+
+    @router.post("/api/sessions/{session_id}/extract")
+    def extract_dossier_now(session_id: str) -> dict:
+        """[Dossier extrahieren] in Live Dossier: SLOT-GATES scan of the full conversation."""
+        session = registry.get(session_id)
+        try:
+            session = pipeline.refresh_dossier_extract(session)
+        except Exception as exc:
+            raise HTTPException(502, f"Dossier extract failed: {exc}") from exc
+        registry.put(session)
+        ev = session.evaluation
+        offer_end = bool(
+            ev
+            and (
+                ev.ready_for_closing
+                or not ev.missing_fields
+                or float(ev.field_coverage or 0) >= 1.0
+            )
+        )
+        return {"session": session.model_dump(), "offer_end": offer_end}
+
+    @router.post("/api/sessions/{session_id}/extract/prepare")
+    def extract_prepare(session_id: str) -> dict:
+        """Browser LLM: return extract prompts for on-demand dossier update."""
+        session = registry.get(session_id)
+        return pipeline.prepare_extract_only(session)
+
+    @router.post("/api/sessions/{session_id}/extract/commit")
+    def extract_commit(session_id: str, body: CommitExtractBody) -> dict:
+        """Browser LLM: apply on-demand extract JSON."""
+        session = registry.get(session_id)
+        try:
+            session = pipeline.commit_extract_only(session, body.raw_extract or "")
+        except Exception as exc:
+            raise HTTPException(502, f"Extract commit failed: {exc}") from exc
+        registry.put(session)
+        ev = session.evaluation
+        offer_end = bool(
+            ev
+            and (
+                ev.ready_for_closing
+                or not ev.missing_fields
+                or float(ev.field_coverage or 0) >= 1.0
+            )
+        )
+        return {"session": session.model_dump(), "offer_end": offer_end}
 
     # ------------------------------------------------------------------
     # Interview config: the editable prompt, greeting and question catalog.

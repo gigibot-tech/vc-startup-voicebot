@@ -6,7 +6,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from startup_voice.domain import InterviewSession
-from startup_voice.features.dossier.review import Decision, apply_decisions, propose_field_update
+from startup_voice.domain import TurnMessage
+from startup_voice.features.dossier.review import (
+    Decision,
+    apply_decisions,
+    apply_extract_updates,
+    propose_field_update,
+)
 from startup_voice.features.dossier.scoring import evaluate_session
 from startup_voice.web import create_app
 from test_pipeline import StubExtractLLM
@@ -14,6 +20,43 @@ from test_pipeline import StubExtractLLM
 
 def _team():
     return InterviewSession.create().objects["team"]
+
+
+def test_extract_replaces_analyst_milestone_examples_with_founder_quote():
+    session = InterviewSession.create()
+    session.messages = [
+        TurnMessage(role="user", content="eine preseed runde von 200k und wir wollen bis Jahresende an 3 Uni campusse launchen"),
+        TurnMessage(
+            role="assistant",
+            content="Kurz: welche zwei konkreten Runway-Meilensteine (z. B. „Beta-Test ablaufen“, „erste 5 Campus-Gruppen“) und Gehälter, Tools, Support?",
+        ),
+        TurnMessage(
+            role="user",
+            content="Wir wollen wirklich die ein 2 Personen einstellen, für die jetzt 200 bis 500 Tage",
+        ),
+    ]
+    apply_extract_updates(
+        session,
+        {
+            "financing": {
+                "fields": {
+                    "use_of_funds": "Gehälter, Tools, Support für zwei Personen",
+                    "runway_milestones": "Beta-Test ablaufen, erste 5 Campus-Gruppen",
+                },
+                "evidence": [
+                    "eine preseed runde von 200k und wir wollen bis Jahresende an 3 Uni campusse launchen",
+                    "Wir wollen wirklich die ein 2 Personen einstellen, für die jetzt 200 bis 500 Tage",
+                ],
+            }
+        },
+        {},
+        turn=11,
+    )
+    fields = session.objects["financing"].fields
+    assert "3 Uni" in fields["runway_milestones"]
+    assert "Beta-Test" not in fields["runway_milestones"]
+    assert "einstellen" in fields["use_of_funds"]
+    assert "Gehälter" not in fields["use_of_funds"]
 
 
 def test_empty_field_is_written_directly():

@@ -487,7 +487,7 @@ def test_finalize_creates_multiple_timestamped_dossier_versions(tmp_path: Path, 
     # Both versions downloadable via HTTP
     r_md1 = client.get(f"/api/sessions/{sid}/dossiers/{v1['id']}.md")
     r_json2 = client.get(f"/api/sessions/{sid}/dossiers/{v2['id']}.json")
-    assert r_md1.status_code == 200 and "HTGF" in r_md1.text
+    assert r_md1.status_code == 200 and "Startup Erstgespräch" in r_md1.text
     assert r_json2.status_code == 200 and r_json2.json()["turn_index"] >= 2
 
     # Clicking 'Weiter fragen' (/continue) appends a new analyst question
@@ -545,6 +545,96 @@ def test_context_and_token_limit_warning_embedded_in_assistant_message(tmp_path:
     assert last_msg.role == "assistant"
     assert "granite4.2:8b" in last_msg.warning
     assert "Kontext-/Tokenlimit" in last_msg.warning
+
+
+def test_focus_slots_tuple_surfaces_both_detail_and_next_rotation_for_llm():
+    """Reproduces session f6402c47500d turn 11:
+    Only traction.growth_signal and financing.runway_milestones are still empty.
+    pick_next_focus_slots / FOCUS_SLOTS is the ordered tuple ('traction', 'financing')
+    (or size 1 ('financing',) once traction is filled), giving the LLM both:
+      - ASK_NOW = traction (missing=['growth_signal']) for a detailed probe if needed
+      - NEXT_SLOT = financing (missing=['runway_milestones']) as the rotation target
+    so the LLM judges whether to probe detail on focus_slots[0] or rotate to focus_slots[1].
+    """
+    from startup_voice.features.interview.prompts import pick_ask_focus_tuple
+
+    session = InterviewSession.create(language="en")
+    for s in ("team", "product", "market"):
+        for f in DIMENSIONS_SPEC[s].required_fields:
+            session.objects[s].fields[f] = "filled"
+        session.objects[s].belege = 0.8
+    session.objects["traction"].fields["customers_pilots"] = "0 users"
+    session.objects["traction"].fields["metrics_revenue"] = "no income"
+    session.objects["traction"].fields["growth_signal"] = ""
+    session.objects["financing"].fields["raise_amount_round"] = "five to six digit"
+    session.objects["financing"].fields["use_of_funds"] = "hire people"
+    session.objects["financing"].fields["runway_milestones"] = ""
+    refresh_evaluation(session)
+
+    assert session.evaluation.next_focus_slots == ["traction", "financing"]
+    assert pick_ask_focus_tuple(
+        prior_focus="traction",
+        coverages=session.evaluation.slot_coverage,
+        missing_in_focus=["growth_signal"],
+    ) == ("traction", "financing")
+
+    _sys, user_prompt = build_reply_prompt(
+        session,
+        "Now it's pretty flat and yeah",
+        session.evaluation.next_focus_slots,
+        reply_system_prompt=DEFAULT_REPLY_SYSTEM,
+        followup_mode="balanced",
+        slot_question="",
+    )
+    assert "FOCUS_SLOTS (balanced/depth): ['traction', 'financing']" in user_prompt
+    assert "ASK_NOW: traction" in user_prompt
+    assert "missing=['growth_signal']" in user_prompt
+    assert "NEXT_SLOT if Founder just answered ASK_NOW: financing" in user_prompt
+    assert "missing=['runway_milestones']" in user_prompt
+
+    # Once traction.growth_signal is filled, next_focus_slots shrinks to size 1: ['financing']
+    session.objects["traction"].fields["growth_signal"] = "flat"
+    refresh_evaluation(session)
+    assert session.evaluation.next_focus_slots == ["financing"]
+
+
+def test_single_open_compound_field_backfills_from_summary_or_evidence():
+    """Reproduces session f6402c47500d turns 14–17 ('93% forever' trap):
+    financing has raise_amount_round + use_of_funds filled, only runway_milestones empty.
+    Extract writes 'Runway roughly a quarter or more' into financing.summary and
+    ['for a quarter or more', 'pilot with 20 users'] into evidence, but leaves
+    fields.runway_milestones == ''. merge_slot_update must backfill that last open field
+    so the session reaches 100% / ready_for_closing.
+    """
+    from startup_voice.features.dossier.review import merge_slot_update
+
+    session = InterviewSession.create(language="en")
+    for s in ("team", "product", "traction", "market"):
+        for f in DIMENSIONS_SPEC[s].required_fields:
+            session.objects[s].fields[f] = "filled"
+        session.objects[s].belege = 0.8
+    session.objects["financing"].fields["raise_amount_round"] = "five to six digit"
+    session.objects["financing"].fields["use_of_funds"] = "hire people"
+    session.objects["financing"].fields["runway_milestones"] = ""
+    session.objects["financing"].belege = 0.8
+
+    merge_slot_update(
+        session.objects["financing"],
+        {
+            "summary": "Runway roughly a quarter or more",
+            "evidence": ["for a quarter or more", "pilot with 20 users"],
+            "fields": {"runway_milestones": ""},
+            "missing_or_vague": ["runway_milestones"],
+        },
+        turn=17,
+    )
+    ev = refresh_evaluation(session)
+    assert session.objects["financing"].fields["runway_milestones"] == "Runway roughly a quarter or more"
+    assert ev.field_coverage == 1.0
+    assert ev.ready_for_closing is True
+
+
+
 
 
 

@@ -20,6 +20,15 @@ _DEFAULT_LANG = "de"
 _PROBE_TIMEOUT = float(os.getenv("STT_PROBE_TIMEOUT", "2.5"))
 _STT_TIMEOUT = float(os.getenv("STT_TIMEOUT", "45"))
 
+# Circuit breaker: once ElevenLabs returns 401/quota_exceeded, stop advertising it as
+# healthy in /health and /api/voice/preflight so the browser immediately uses Web Speech.
+_ELEVENLABS_UNAVAILABLE_REASON: str = ""
+
+
+def mark_elevenlabs_unavailable(reason: str) -> None:
+    global _ELEVENLABS_UNAVAILABLE_REASON
+    _ELEVENLABS_UNAVAILABLE_REASON = reason[:200]
+
 
 class SttError(RuntimeError):
     """Raised when transcription / probe fails."""
@@ -62,9 +71,13 @@ class ElevenLabsStt:
     name: str = "elevenlabs"
 
     def configured(self) -> bool:
+        if _ELEVENLABS_UNAVAILABLE_REASON:
+            return False
         return bool(os.getenv("ELEVENLABS_API_KEY", "").strip())
 
     def probe(self) -> None:
+        if _ELEVENLABS_UNAVAILABLE_REASON:
+            raise SttError(f"ElevenLabs unavailable: {_ELEVENLABS_UNAVAILABLE_REASON}")
         if not self.configured():
             raise SttError("ELEVENLABS_API_KEY missing")
         _dns_ok("api.elevenlabs.io")
@@ -92,6 +105,9 @@ class ElevenLabsStt:
                 tag_audio_events=False,
             )
         except Exception as exc:
+            err_s = str(exc)
+            if "quota_exceeded" in err_s or "401" in err_s or "invalid_api_key" in err_s.lower():
+                mark_elevenlabs_unavailable("quota_exceeded / auth failed")
             raise SttError(f"ElevenLabs STT failed: {exc}") from exc
         return (getattr(result, "text", None) or "").strip()
 
@@ -281,7 +297,9 @@ def transcribe_audio(
 
 
 def probe_tts_fast() -> dict:
-    """Fail-fast TTS readiness (key + DNS). Not a full synthesize."""
+    """Fail-fast TTS readiness (key + DNS + circuit breaker). Not a full synthesize."""
+    if _ELEVENLABS_UNAVAILABLE_REASON:
+        return {"ok": False, "provider": "elevenlabs", "errors": [_ELEVENLABS_UNAVAILABLE_REASON]}
     key = os.getenv("ELEVENLABS_API_KEY", "").strip()
     if not key:
         return {"ok": False, "provider": None, "errors": ["ELEVENLABS_API_KEY missing"]}
