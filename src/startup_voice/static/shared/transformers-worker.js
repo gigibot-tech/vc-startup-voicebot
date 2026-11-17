@@ -453,6 +453,10 @@ async function transcribe({ id, audio, language }) {
       language: lang === "en" ? "english" : "german",
       task: "transcribe",
       return_timestamps: false,
+      // Whisper reads ONE 30 s window; without chunking everything after ~30 s is silently cut
+      // off (the end of a long answer disappears). Chunk with overlap and stitch the text back.
+      chunk_length_s: 30,
+      stride_length_s: 5,
     });
     const text = (typeof result === "string" ? result : result?.text || "").trim();
     setState("whisper", "ready");

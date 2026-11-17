@@ -35,6 +35,7 @@ const loadLiveKit = () => (lkModule ??= import(LIVEKIT_CLIENT));
  * @param {() => boolean} [deps.confirmInterrupt]
  * @param {Function} deps.api              JSON fetch wrapper (shared/api.js; injected so node tests can fake it)
  * @param {Function} [deps.loadClient]     resolves the livekit-client module (tests inject a fake)
+ * @param {{play(name: string): number}} [deps.cues]  audio cues (cues.js): listen / heard / end
  * @param {number} [deps.readyTimeoutMs]   how long to wait for the worker to join the room
  * @param {object} [deps.browserStt]       local Whisper in the browser (browser-listen.js):
  *   {isEnabled(): boolean, prepare(): Promise, createListener(handlers): {start, stop},
@@ -43,7 +44,7 @@ const loadLiveKit = () => (lkModule ??= import(LIVEKIT_CLIENT));
  */
 export function createLiveKitVoice({
   base, prefs, getLanguage, getSessionId, canListen, onTranscript, onAbort, confirmInterrupt,
-  api, loadClient = loadLiveKit, readyTimeoutMs = READY_TIMEOUT_MS, browserStt = null,
+  api, loadClient = loadLiveKit, readyTimeoutMs = READY_TIMEOUT_MS, browserStt = null, cues = null,
 }) {
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -62,6 +63,7 @@ export function createLiveKitVoice({
   let localStt = false;     // this call transcribes in the browser
   let listener = null;
   let sttChain = Promise.resolve(); // utterances are transcribed one after another, in order
+  let quietUntil = 0;       // a cue just played: speech detector stays deaf until then
 
   // Reply speech, one stream per turn. `out` remembers WHICH driver took the stream at begin(),
   // so a call that starts or ends mid-reply never splits one reply across two voices.
@@ -104,12 +106,20 @@ export function createLiveKitVoice({
   }
 
   /** Back to "mic open, nobody talking" and send what the founder said in the meantime. */
+  /** Play a cue and keep our own speech detector from mistaking it for the founder. */
+  function cue(name) {
+    const ms = cues?.play(name) || 0;
+    if (ms) quietUntil = Date.now() + ms + 400;
+  }
+
   function settle(status) {
     if (!connected) return;
+    if (base.getPhase() !== "listening") cue("listen"); // your turn
     base.setVoicePhase("listening", status ?? tx("Ich höre zu…", "Listening…"));
     if (queued) {
       const text = queued;
       queued = "";
+      base.clearLiveBubble?.();
       void onTranscript(text);
     }
   }
@@ -120,12 +130,16 @@ export function createLiveKitVoice({
 
   function handleTranscript(raw) {
     const text = String(raw || "").trim();
-    if (text.length < 2 || !connected) return; // silence / noise ("." etc.) is not an answer
+    if (text.length < 2 || !connected) { base.clearLiveBubble?.(); return; } // noise is not an answer
+    cue("heard");
     if (base.getPhase() === "thinking") {
-      // A turn is in flight and chat.sendText() would drop this: hold it until the agent is done.
+      // A turn is in flight and chat.sendText() would drop this: hold it until the agent is done,
+      // but keep it visible as a pending bubble so the founder sees it was heard.
       queued = queued ? `${queued} ${text}` : text;
+      base.paintSttPreview?.(queued);
       base.setStatus(tx("Wird nach der Antwort gesendet…", "Sending after the reply…"));
     } else {
+      base.clearLiveBubble?.(); // sendText() paints the real "Du" bubble
       void onTranscript(text);
     }
   }
@@ -139,13 +153,17 @@ export function createLiveKitVoice({
       base.setVoicePhase("listening", tx("Ich höre zu…", "Listening…"));
     } else if (base.getPhase() === "listening") {
       base.setStatus(tx("Ich höre zu…", "Listening…"));
+      base.paintSttPreview?.(""); // waiting bubble: "…" while the founder talks (no live words with Whisper)
     }
   }
 
   function onLocalUtterance(samples, rate) {
     const lang = String(getLanguage()).slice(0, 2).toLowerCase();
     const wasListening = base.getPhase() === "listening";
-    if (wasListening) base.setStatus(tx("Transkribiere…", "Transcribing…"));
+    if (wasListening) {
+      base.setStatus(tx("Transkribiere…", "Transcribing…"));
+      base.paintSttPreview?.(tx("Transkribiere…", "Transcribing…"));
+    }
     sttChain = sttChain
       .then(() => browserStt.transcribe(samples, rate, lang))
       .then((text) => { if (connected) handleTranscript(text); })
@@ -162,8 +180,8 @@ export function createLiveKitVoice({
         readyResolve?.();
         break;
       case "interim":
-        // Live words only while nobody else owns the status line ("Thinking…", "Speaking…").
-        if (connected && base.getPhase() === "listening") base.setStatus(String(ev.text || ""));
+        // Live words in a chat bubble (same as classic), only while we are the one listening.
+        if (connected && base.getPhase() === "listening") base.paintSttPreview?.(String(ev.text || ""));
         break;
       case "user_state":
         // Founder started talking over the agent: classic mic-click behaviour, hands-free.
@@ -203,7 +221,24 @@ export function createLiveKitVoice({
     audioHost.appendChild(track.attach());
   }
 
+  /** Wave + orb react to the founder's mic whenever the call is open, so "I'm listening" is obvious. */
+  function startMeter(r, Track) {
+    try {
+      const stream = listener?.getStream?.()
+        || (() => {
+          const track = r.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack;
+          return track ? new MediaStream([track]) : null;
+        })();
+      if (stream) base.startWaveform?.(stream);
+      else base.startSyntheticWaveform?.();
+    } catch {
+      base.startSyntheticWaveform?.();
+    }
+  }
+
   function cleanup() {
+    base.stopWaveform?.();
+    base.clearLiveBubble?.();
     if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
     pending = "";
     streamOn = false;
@@ -292,13 +327,14 @@ export function createLiveKitVoice({
           onSpeechStart: onLocalSpeechStart,
           onUtterance: onLocalUtterance,
           // The agent's own voice leaks into the mic: be pickier while it speaks.
-          getSensitivity: () => (base.getPhase() === "speaking" ? 2.2 : 1),
+          getSensitivity: () => (base.getPhase() === "speaking" || Date.now() < quietUntil ? 2.2 : 1),
         });
         await listener.start();
       }
 
       connected = true;
       connecting = false;
+      startMeter(r, Track);
       callSessionId = sid;
       callLanguage = String(getLanguage()).slice(0, 2).toLowerCase();
       settle(tx("Live – ich höre zu", "Live – listening"));
@@ -312,7 +348,9 @@ export function createLiveKitVoice({
 
   function disconnect(reason) {
     const was = connected || connecting;
+    const wasLive = connected;
     cleanup();
+    if (wasLive) cue("end");
     if (was) base.setVoicePhase("idle", reason || tx("Gespräch beendet", "Call ended"));
   }
 

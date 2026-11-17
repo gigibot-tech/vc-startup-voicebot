@@ -152,6 +152,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
   function paint() {
     $("langSel").value = prefs.lang;
     $("voiceOn").checked = prefs.voice;
+    if ($("cuesOn")) $("cuesOn").checked = prefs.cues !== false;
     if ($("voiceSpeedSel")) $("voiceSpeedSel").value = String(clampSpeed(prefs.speed));
     $("autoListen").checked = prefs.auto;
     const sttSel = $("sttSel");
@@ -312,6 +313,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
       syncVoiceDeps();
       if (!prefs.voice) voice.stopSpeak();
     });
+    bindPref("cuesOn", "change", (e) => e.checked, "cues");
     bindPref("voiceSpeedSel", "change", (e) => clampSpeed(e.value), "speed");
     ["stability", "similarity"].forEach((key) => {
       bindPref(`${key}Range`, "input", (e) => clamp01(Number(e.value) / 100), key, () => {

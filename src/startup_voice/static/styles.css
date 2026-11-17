@@ -152,7 +152,13 @@ button, select, input { font: inherit; color: inherit; }
   opacity: 0.65;
   transition: background 0.6s ease, opacity 0.3s ease, transform 0.3s ease;
 }
-.voice-orb.listening { opacity: 1; animation: pulse 1.2s ease infinite; }
+/* Listening: the orb breathes gently and swells with the mic level (--mic-level, set by voice.js). */
+.voice-orb.listening {
+  opacity: 1; animation: breathe 2s ease-in-out infinite;
+  scale: calc(1 + var(--mic-level, 0) * 0.5); transition: scale 0.08s linear, opacity 0.3s ease;
+  box-shadow: 0 0 calc(8px + var(--mic-level, 0) * 38px) color-mix(in srgb, var(--vi-berry) 60%, transparent);
+}
+@keyframes breathe { 50% { transform: scale(1.07); } }
 .voice-orb.speaking {
   opacity: 1;
   background: color-mix(in srgb, var(--progress-accent) 70%, var(--master-ambient));
@@ -216,19 +222,22 @@ button, select, input { font: inherit; color: inherit; }
 
 /* Settings panel: two plain-language cards for founders + a closed "Technik" fold. */
 .prefs-bar {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); gap: 1rem;
-  padding: 1rem 1.25rem 1.1rem; border-bottom: 1px solid var(--vi-border);
+  /* Two equal cards side by side over the full width, centred on very wide screens. */
+  display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem;
+  padding: 1.25rem max(1.25rem, calc((100% - 82rem) / 2)) 1.4rem;
+  align-items: stretch; border-bottom: 1px solid var(--vi-border);
   background: var(--vi-accent-2); font-size: 0.9rem; align-items: start;
 }
 .prefs-card {
-  min-width: 0;
-  display: flex; flex-direction: column; gap: 0.8rem; padding: 1rem 1.1rem;
+  min-width: 0; container-type: inline-size;
+  display: flex; flex-direction: column; gap: 1rem; padding: 1.25rem 1.4rem;
   border: 1px solid var(--vi-border); border-radius: 1rem; background: var(--vi-base);
 }
 .prefs-card__title { margin: 0; font-size: 1.02rem; font-weight: 700; letter-spacing: -0.01em; }
 .prefs-note { margin: 0; font-size: 0.8rem; opacity: 0.7; line-height: 1.45; }
 
-.mode-cards { display: grid; grid-template-columns: 1fr; gap: 0.55rem; }
+.mode-cards { display: grid; grid-template-columns: 1fr; gap: 0.75rem; }
+@container (min-width: 30rem) { .mode-cards { grid-template-columns: 1fr 1fr; } .mode-card { align-items: flex-start; } }
 .mode-card {
   display: flex; gap: 0.75rem; align-items: center; text-align: left; cursor: pointer; min-width: 0;
   padding: 0.8rem 0.85rem; border-radius: 0.85rem; font: inherit; color: inherit;
@@ -272,16 +281,23 @@ button, select, input { font: inherit; color: inherit; }
 .switch-row__text strong { font-size: 0.92rem; }
 .switch-row__text span { font-size: 0.8rem; opacity: 0.7; }
 
-.pick-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 0.75rem; font-weight: 600; }
+/* Label left, control right, every row aligned on the same column. */
+.pick-row { display: grid; grid-template-columns: minmax(0, 1fr) 15rem; align-items: center; gap: 0.5rem 1rem; font-weight: 600; }
+@container (max-width: 26rem) { .pick-row { grid-template-columns: 1fr; } }
 .pick-row select {
   font: inherit; font-weight: 500; padding: 0.45rem 0.65rem; border-radius: 0.6rem;
-  border: 1px solid var(--vi-border); background: var(--vi-base); color: inherit; min-width: 11rem;
+  border: 1px solid var(--vi-border); background: var(--vi-base); color: inherit; width: 100%;
 }
 
 .prefs-tech { grid-column: 1 / -1; }
+@media (max-width: 760px) { .prefs-bar { grid-template-columns: 1fr; } }
 .prefs-tech > summary { flex-wrap: wrap; }
 .prefs-tech > summary small { font-weight: 400; opacity: 0.6; font-size: 0.78rem; margin-right: auto; margin-left: 0.6rem; }
-.prefs-tech__grid { display: flex; flex-wrap: wrap; gap: 0.85rem 1.5rem; align-items: flex-start; font-size: 0.78rem; }
+.prefs-tech__grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem 1.5rem;
+  align-items: start; font-size: 0.78rem;
+}
+.prefs-tech__grid .prefs-group { height: 100%; align-content: flex-start; padding: 0.75rem 0.9rem; }
 .prefs-tech .prefs-prompt { margin-top: 0.85rem; font-size: 0.78rem; }
 .prefs-hint--warn { color: var(--vi-berry); opacity: 0.9; }
 .visually-hidden {

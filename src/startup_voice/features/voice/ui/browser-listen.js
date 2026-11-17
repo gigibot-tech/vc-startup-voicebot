@@ -171,6 +171,8 @@ export function createMicListener({ onSpeechStart, onUtterance, getSensitivity }
       };
       ctx.createMediaStreamSource(stream).connect(node); // not connected to the speakers
     },
+    /** The open microphone stream (for the level meter). */
+    getStream: () => stream,
     stop() {
       try { node?.disconnect(); } catch { /* gone */ }
       stream?.getTracks().forEach((t) => t.stop());

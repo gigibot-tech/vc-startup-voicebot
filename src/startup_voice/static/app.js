@@ -22,6 +22,7 @@ import { createVoice } from "./features/voice/voice.js";
 import { createLiveKitVoice } from "./features/voice/voice-livekit.js";
 import { createVoiceSwitch } from "./features/voice/voice-mode.js";
 import { createMicListener, resampleTo16k } from "./features/voice/browser-listen.js";
+import { createCues } from "./features/voice/cues.js";
 import { prefs, savePrefs } from "./features/prefs/prefs.js";
 import { createSettings } from "./features/prefs/settings.js";
 import { createSessions, readUrlSessionId, syncUrl } from "./features/sessions/lifecycle.js";
@@ -86,6 +87,7 @@ const livekitVoice = createLiveKitVoice({
   api,
   base: classicVoice,
   getSessionId: activeId,
+  cues: createCues({ isEnabled: () => prefs.cues !== false }),
   // Settings > STT = "Whisper (Browser)": in a call the browser transcribes (local Transformers.js
   // Whisper) and the worker only speaks. Any other STT choice: the worker listens.
   browserStt: {

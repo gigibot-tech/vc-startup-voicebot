@@ -13,6 +13,8 @@ const DEFAULTS = {
   stt: "auto",
   /** "" = follow the server's VOICE_MODE; "classic" = push-to-talk; "livekit" = hands-free call */
   voiceMode: "",
+  /** short signal tones in a hands-free call (your turn / got it / call ended) */
+  cues: true,
   /** local = downloadable Transformers.js TTS (default); browser = Web Speech; elevenlabs = cloud */
   tts: "local",
   stability: 0.45, similarity: 0.75,

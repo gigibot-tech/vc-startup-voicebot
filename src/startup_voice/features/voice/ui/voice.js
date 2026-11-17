@@ -237,7 +237,14 @@ export function createVoice({
     else if (phase === "speaking") setStatus("Speaking…");
   };
 
+  /** Mic loudness 0..1 -> CSS var on the orbs, so the orb visibly "breathes" with your voice. */
+  function setMicLevel(v) {
+    const val = String(Math.max(0, Math.min(1, v || 0)).toFixed(3));
+    [voiceOrb, voiceOrbTop].forEach((el) => el?.style.setProperty("--mic-level", val));
+  }
+
   function stopWaveform() {
+    setMicLevel(0);
     if (waveRaf) cancelAnimationFrame(waveRaf);
     waveRaf = 0;
     waveAnalyser = null;
@@ -270,6 +277,7 @@ export function createVoice({
       const w = canvas.width;
       const h = canvas.height;
       c.clearRect(0, 0, w, h);
+      setMicLevel(0.25 + 0.2 * Math.sin(tick));
       const bars = 28;
       const gap = 2;
       const bw = (w - gap * (bars - 1)) / bars;
@@ -305,6 +313,9 @@ export function createVoice({
         const w = canvas.width;
         const h = canvas.height;
         c.clearRect(0, 0, w, h);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) sum += data[i];
+        setMicLevel((sum / data.length / 255) * 2.4);
         const bars = 28;
         const gap = 2;
         const bw = (w - gap * (bars - 1)) / bars;
@@ -1194,6 +1205,12 @@ export function createVoice({
     setVoicePhase,
     setExtractBusy,
     syncMicLabels,
+    // live-listening visuals, reused by the LiveKit driver (additive: not part of the driver contract)
+    paintSttPreview,
+    clearLiveBubble,
+    startWaveform,
+    startSyntheticWaveform,
+    stopWaveform,
     sttLabel,
     resolveSttProvider,
     applySttProvider,

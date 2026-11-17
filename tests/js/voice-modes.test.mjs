@@ -11,6 +11,7 @@ globalThis.document = {
   body: { appendChild() {} },
 };
 
+globalThis.MediaStream = class { constructor(tracks) { this.tracks = tracks; } };
 const { createLiveKitVoice } = await import("../../src/startup_voice/features/voice/ui/voice-livekit.js");
 const { createVoiceSwitch, METHODS } = await import("../../src/startup_voice/features/voice/ui/voice-mode.js");
 
@@ -39,6 +40,11 @@ function fakeBase() {
     pushSpeakStream: rec("pushSpeakStream"),
     endSpeakStream: rec("endSpeakStream"),
     onMicClick: rec("onMicClick"),
+    paintSttPreview: rec("paintSttPreview"),
+    clearLiveBubble: rec("clearLiveBubble"),
+    startWaveform: rec("startWaveform"),
+    startSyntheticWaveform: rec("startSyntheticWaveform"),
+    stopWaveform: rec("stopWaveform"),
   };
   return base;
 }
@@ -52,6 +58,7 @@ function fakeLiveKit({ autoReady = true } = {}) {
   class Room {
     constructor() { state.room = this; this.localParticipant = {
       setMicrophoneEnabled: async () => {},
+      getTrackPublication: () => ({ track: { mediaStreamTrack: { id: "mic" } } }),
       publishData: async (bytes, opts) => { sent.push({ ...JSON.parse(new TextDecoder().decode(bytes)), topic: opts.topic }); },
     }; }
     on(ev, fn) { handlers[ev] = fn; }
@@ -64,11 +71,11 @@ function fakeLiveKit({ autoReady = true } = {}) {
   );
   return {
     sent, emit, state, handlers,
-    client: { Room, RoomEvent, Track: { Kind: { Audio: "audio" } }, ParticipantKind: { AGENT: 4 } },
+    client: { Room, RoomEvent, Track: { Kind: { Audio: "audio" }, Source: { Microphone: "microphone" } }, ParticipantKind: { AGENT: 4 } },
   };
 }
 
-function setup({ lk = fakeLiveKit(), sessionId = "s1", prefs = {}, readyTimeoutMs = 200, browserStt = null } = {}) {
+function setup({ lk = fakeLiveKit(), sessionId = "s1", prefs = {}, readyTimeoutMs = 200, browserStt = null, cues = null } = {}) {
   const base = fakeBase();
   const transcripts = [];
   const aborts = [];
@@ -86,6 +93,7 @@ function setup({ lk = fakeLiveKit(), sessionId = "s1", prefs = {}, readyTimeoutM
     loadClient: async () => lk.client,
     readyTimeoutMs,
     browserStt,
+    cues,
   });
   return { voice, base, lk, transcripts, aborts, ctx, joins };
 }
@@ -429,4 +437,121 @@ test("browser Whisper: a microphone that cannot be opened ends the attempt with 
   await flush();
   assert.equal(t.voice.isConnected(), false);
   assert.match(t.base.calls.filter((c) => c[0] === "setVoicePhase").at(-1)[2], /Permission denied/);
+});
+
+
+// ---------- "I'm listening" must be obvious: live bubble, wave, orb ------------------------
+
+const names = (base) => base.calls.map((c) => c[0]);
+
+test("live words from the worker appear in the chat bubble, not just the status line", async () => {
+  const { base, lk } = await connected();
+  lk.emit({ t: "interim", text: "Wir sind zwei" });
+  assert.deepEqual(base.calls.filter((c) => c[0] === "paintSttPreview").at(-1), ["paintSttPreview", "Wir sind zwei"]);
+});
+
+test("the live bubble is cleared when the final transcript is sent as the real message", async () => {
+  const { base, lk, transcripts } = await connected();
+  lk.emit({ t: "interim", text: "Wir sind zwei" });
+  lk.emit({ t: "transcript", text: "Wir sind zwei Gründer" });
+  const order = names(base).filter((n) => n === "paintSttPreview" || n === "clearLiveBubble");
+  assert.equal(order.at(-1), "clearLiveBubble");
+  assert.deepEqual(transcripts, ["Wir sind zwei Gründer"]);
+});
+
+test("speech heard while the reply is pending stays visible as a pending bubble", async () => {
+  const { voice, base, lk } = await connected();
+  voice.setVoicePhase("thinking");
+  lk.emit({ t: "transcript", text: "Ach und noch eine Sache" });
+  assert.deepEqual(base.calls.filter((c) => c[0] === "paintSttPreview").at(-1), ["paintSttPreview", "Ach und noch eine Sache"]);
+});
+
+test("browser Whisper: a waiting bubble shows while you talk, 'Transcribing…' while Whisper works", async () => {
+  const st = fakeBrowserStt();
+  const t = await connected({ browserStt: st.api });
+  st.handlers.onSpeechStart();
+  assert.deepEqual(t.base.calls.filter((c) => c[0] === "paintSttPreview").at(-1), ["paintSttPreview", ""]);
+  st.handlers.onUtterance(new Float32Array(10), 16000);
+  assert.match(t.base.calls.filter((c) => c[0] === "paintSttPreview").at(-1)[1], /Transkribiere/);
+  await flush();
+  assert.equal(names(t.base).filter((n) => n === "clearLiveBubble").length > 0, true);
+});
+
+test("the wave and orb meter start when the call is live and stop when it ends", async () => {
+  const t = await connected();
+  assert.ok(names(t.base).includes("startWaveform"), "wave runs from the call's mic track");
+  const stream = t.base.calls.find((c) => c[0] === "startWaveform")[1];
+  assert.deepEqual(stream.tracks, [{ id: "mic" }]);
+  t.base.calls.length = 0;
+  t.voice.setVoicePhase("listening");
+  t.voice.onMicClick(); // hang up
+  assert.ok(names(t.base).includes("stopWaveform"));
+});
+
+test("browser Whisper: the wave uses the listener's own microphone stream", async () => {
+  const st = fakeBrowserStt();
+  const own = { own: true };
+  st.api.createListener = (h) => { st.handlers = h; return { start: async () => {}, stop() {}, getStream: () => own }; };
+  const t = await connected({ browserStt: st.api });
+  assert.equal(t.base.calls.find((c) => c[0] === "startWaveform")[1], own);
+});
+
+
+// ---------- audio cues --------------------------------------------------------------------
+
+const fakeCues = (ms = 100) => { const played = []; return { played, play: (n) => { played.push(n); return ms; } }; };
+
+test("cues: 'listen' when the call opens and again when it is your turn after a reply", async () => {
+  const cues = fakeCues();
+  const t = await connected({ cues });
+  assert.deepEqual(cues.played, ["listen"]);
+  t.voice.setVoicePhase("thinking");
+  t.voice.beginSpeakStream();
+  t.voice.pushSpeakStream("Danke.");
+  t.voice.endSpeakStream("Danke.");
+  const id = cmds(t.lk).find((c) => c.t === "speak_begin").id;
+  t.lk.emit({ t: "agent_state", state: "speaking" });
+  t.lk.emit({ t: "speak_done", id, interrupted: false });
+  assert.deepEqual(cues.played, ["listen", "listen"]);
+});
+
+test("cues: no repeated 'listen' while you are already being listened to", async () => {
+  const cues = fakeCues();
+  const t = await connected({ cues });
+  t.voice.setVoicePhase("idle"); // maps to listening again
+  t.lk.emit({ t: "user_state", state: "speaking" });
+  assert.deepEqual(cues.played, ["listen"]);
+});
+
+test("cues: 'heard' when your answer arrives, not for noise", async () => {
+  const cues = fakeCues();
+  const t = await connected({ cues });
+  t.lk.emit({ t: "transcript", text: "." });
+  assert.deepEqual(cues.played, ["listen"]);
+  t.lk.emit({ t: "transcript", text: "Wir sind zwei Gründer" });
+  assert.deepEqual(cues.played, ["listen", "heard"]);
+});
+
+test("cues: 'end' when you hang up", async () => {
+  const cues = fakeCues();
+  const t = await connected({ cues });
+  t.voice.onMicClick();
+  assert.equal(cues.played.at(-1), "end");
+});
+
+test("cues: the browser's speech detector stays deaf while a cue is ringing", async () => {
+  const st = fakeBrowserStt();
+  const cues = fakeCues(150);
+  const t = await connected({ browserStt: st.api, cues });
+  assert.equal(st.handlers.getSensitivity(), 2.2); // right after the 'listen' cue
+  await new Promise((r) => setTimeout(r, 650));
+  assert.equal(st.handlers.getSensitivity(), 1);   // cue (150 ms) + 400 ms margin are over
+});
+
+test("cues: a failed connection plays nothing", async () => {
+  const cues = fakeCues();
+  const t = setup({ lk: fakeLiveKit({ autoReady: false }), readyTimeoutMs: 30, cues });
+  t.voice.onMicClick();
+  await new Promise((r) => setTimeout(r, 90));
+  assert.deepEqual(cues.played, []);
 });
