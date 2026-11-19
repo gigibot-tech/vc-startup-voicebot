@@ -254,6 +254,9 @@ class InterviewSession(BaseModel):
     language: str = "de"
     # Per-session Nachhaken mode (balanced|insist|strict). Default = Ausgewogen.
     followup_mode: str = "balanced"
+    # "slot.field" keys the previous reply asked (skipped next turn so it never repeats).
+    last_asked_fields: list[str] = Field(default_factory=list)
+    last_asked_turn: int = -1  # turn_index those fields were picked for (Retry reuses them)
     objects: dict[SlotId, DimensionState] = Field(default_factory=dict)
     messages: list[TurnMessage] = Field(default_factory=list)
     turn_index: int = 0

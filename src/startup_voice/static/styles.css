@@ -131,6 +131,11 @@ button.logo {
   letter-spacing: 0.04em; cursor: pointer; padding: 0; text-align: left;
 }
 button.logo:hover { opacity: 0.8; }
+.app-version {
+  position: fixed; right: 0.6rem; bottom: 0.3rem; z-index: 5;
+  font-size: 0.68rem; opacity: 0.45; pointer-events: none; user-select: text;
+  font-variant-numeric: tabular-nums;
+}
 button.logo:focus-visible { outline: 2px solid var(--vi-berry); outline-offset: 3px; border-radius: 0.3rem; }
 .logo span {
   background: var(--master-text);

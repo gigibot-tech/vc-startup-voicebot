@@ -92,7 +92,7 @@ Persistenz: `data/sessions/interview_config.json` (Server-SSOT für Prompt + Kat
 ### Dossier actions
 | Button | Meaning |
 |--------|---------|
-| Dossier extrahieren | Full-conversation extract focused on **MISSING_FOCUS** (open fields, lowest coverage first — not all 5 slots equally, not ASK_NOW). Live Dossier `#dossierExtractBtn` |
+| Dossier extrahieren | Full-conversation extract focused on **MISSING_FOCUS** (open fields, lowest coverage first — not all 5 slots equally, not the reply's ASK_1/ASK_2). Live Dossier `#dossierExtractBtn` |
 | Dossier abschließen | Finalize with warnings; then chat Auswahl |
 | Markdown / PDF / JSON | Export readable MD, print PDF, or raw `session.json` |
 | Field labels | UI + exports use German labels from `DIMENSIONS_SPEC.field_labels` (no snake_case) |
@@ -104,7 +104,7 @@ Persistenz: `data/sessions/interview_config.json` (Server-SSOT für Prompt + Kat
 
 - Extract attaches per-field **`confidence` (0–1)** on proposals (fallback: slot belege, else 0.5).
 - Prefs **Auto-resolve if confidence ≥** (default **0.75**; Off = 1.01): client POSTs `choice=new` for matching open proposals after render; history in `session.conflict_history` (expandable “Resolved conflicts”).
-- Reply prompt always appends **REPLY_NO_REASK** + `already_answered`; **ASK_NOW** comes from post-extract coverage (no keyword topic matching). Pace ≈5 substantive turns; 1–2 short questions OK on empty gaps.
+- Reply prompt always appends **REPLY_RULES** + `ALREADY_ANSWERED` + `LAST_QUESTION`. Python picks **ASK_1 / ASK_2** (+ BACKUP) from open fields of the prior extract, skipping the fields asked last turn (`session.last_asked_fields`), so the model always asks two short questions and never repeats itself. Pace ≈5 substantive turns.
 
 ## Honest extract + agent end
 
@@ -113,7 +113,7 @@ Persistenz: `data/sessions/interview_config.json` (Server-SSOT für Prompt + Kat
 
 ## Collect vs score
 
-1. **decide_reply** — **Thinking…** first; ask **ASK_NOW** from prior coverage; never re-ask `already_answered`; may offer `[[intake:end]]`.
+1. **decide_reply** — **Thinking…** first; ask **ASK_1 + ASK_2** (picked in Python, skipping last turn's fields); never re-ask `already_answered`; may offer `[[intake:end]]`.
 2. **fill_objects** — **Updating dossier…** always after the spoken reply (+ `belege` / field `confidence`). Review gate (`dossier/review.py`). SSE: Thinking… → deltas → `reply` → extract status → `done`. Busy UI = topbar `#processBanner`; interrupt needs confirm.
 3. **evaluate** — coverage + LLM Belege after extract; persist `steps/turn_XX.json` + `dossier.md`
 
