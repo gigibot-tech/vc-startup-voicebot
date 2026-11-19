@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Idea</title>
+  <link rel="stylesheet" href="/static/features/board/public.css" />
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/board"><span class="brand-name">Idea board</span><span class="by">by <img src="/static/features/board/ido-logo.svg" alt="iDO!" /></span></a>
+    <nav class="site">
+      <a class="btn" id="cta" href="#">Save an idea</a>
+    </nav>
+  </div></header>
+  <main><div class="wrap">
+    <div id="missing" hidden>
+      <p class="eyebrow">Idea board</p>
+      <h1>This page is not available</h1>
+      <p class="lead">The link is wrong, or the author has withdrawn it.</p>
+      <a class="btn ghost" href="/board">Back to the board</a>
+    </div>
+    <article id="doc" hidden>
+      <p class="eyebrow" id="date"></p>
+      <h1 id="title"></h1>
+      <p class="lead">Written down from a first conversation with the founder and published by its author.</p>
+      <div id="sections" class="sections"></div>
+      <p class="note">Content is written by the author and has not been checked.</p>
+      <details class="report">
+        <summary>Report this page</summary>
+        <form id="reportForm">
+          <textarea id="reportReason" rows="3" maxlength="500" placeholder="What is wrong with this page?"></textarea>
+          <button class="btn ghost" type="submit">Send report</button>
+          <p class="status" id="reportStatus" role="status"></p>
+        </form>
+      </details>
+      <details class="owner">
+        <summary>I am the author and want to withdraw this page</summary>
+        <form id="withdrawForm">
+          <input type="password" id="ownerKey" autocomplete="off" placeholder="Your owner key (starts with ik_)" />
+          <button class="btn ghost" type="submit">Withdraw and delete the text</button>
+          <p class="status" id="withdrawStatus" role="status"></p>
+        </form>
+      </details>
+    </article>
+  </div></main>
+  <footer class="site"><div class="wrap">iDO! Idea board</div></footer>
+  <script type="module" src="/static/features/board/dossier-page.js"></script>
+</body>
+</html>

@@ -150,6 +150,7 @@ def test_say_failure_is_reported_not_raised():
 
     asyncio.run(go())
     assert events[0]["t"] == "error" and "tts offline" in events[0]["message"]
+    assert events[0]["scope"] == "tts"  # the browser then speaks the replies itself
     assert events[1] == {"t": "speak_done", "id": 3, "interrupted": True}
 
 

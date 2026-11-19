@@ -1,0 +1,74 @@
+/* Public Idea Board pages: the look of the iDO! marketing site (paper white, deep navy, green accent,
+   white cards with a hairline border, 12px radius, 6px buttons). System fonts on purpose: loading a
+   web font from a third-party CDN would send every visitor's IP address to that provider. */
+:root {
+  --paper: #fafaf8; --ink: #0b1622; --muted: #55606e; --line: #e4e4e0; --card: #ffffff;
+  --green: #58cc02; --blue: #1cb0f6; --orange: #ff6b35; --yellow: #ffd60a;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink); font-size: 17px; line-height: 1.55;
+  font-family: "Schibsted Grotesk", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+a { color: inherit; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 1.25rem; }
+header.site { border-bottom: 1px solid var(--line); background: var(--paper); }
+header.site .wrap { display: flex; align-items: center; justify-content: space-between; height: 64px; gap: 1rem; }
+.brand { display: inline-flex; align-items: center; gap: 0.6rem; text-decoration: none; }
+.brand-name { font-weight: 500; font-size: 1.35rem; letter-spacing: -0.02em; }
+.by { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.78rem; color: var(--muted); }
+.by img { height: 1.35rem; width: auto; display: block; }
+nav.site { display: flex; align-items: center; gap: 1.25rem; font-size: 0.95rem; }
+nav.site a.link { text-decoration: none; color: var(--muted); }
+nav.site a.link[aria-current="page"], nav.site a.link:hover { color: var(--ink); }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; cursor: pointer;
+  background: var(--ink); color: var(--paper); border: 0; border-radius: 6px; padding: 0.6rem 1rem;
+  font: inherit; font-size: 15px; font-weight: 500; text-decoration: none;
+}
+.btn:hover { opacity: 0.9; }
+.btn.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+main { padding: 3rem 0 4rem; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); line-height: 1.1; font-weight: 500; letter-spacing: -0.02em; margin: 0 0 0.75rem; }
+.lead { color: var(--muted); max-width: 40rem; margin: 0 0 2rem; }
+.eyebrow { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 0.6rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1rem; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 1.25rem;
+  display: flex; flex-direction: column; gap: 0.6rem; text-decoration: none;
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+a.card:hover { border-color: var(--ink); transform: translateY(-2px); }
+.card h2, .card h3 { margin: 0; font-size: 1.15rem; font-weight: 500; line-height: 1.3; }
+.card p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+.chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: auto; padding-top: 0.4rem; }
+.chip { font-size: 0.75rem; padding: 0.15rem 0.55rem; border-radius: 9999px; background: #f0f0ec; color: var(--ink); }
+.chip.product { background: #e6f7d1; } .chip.traction { background: #fff3b8; }
+.chip.market { background: #d6effd; } .chip.financing { background: #ffe0d4; }
+.date { font-size: 0.8rem; color: var(--muted); }
+.empty { border: 1px dashed var(--line); border-radius: 12px; padding: 2rem; color: var(--muted); text-align: center; }
+.sections { display: grid; gap: 1rem; max-width: 46rem; }
+.sections .card p { color: var(--ink); white-space: pre-wrap; font-size: 1rem; }
+.sections .card h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.note { font-size: 0.85rem; color: var(--muted); max-width: 46rem; margin-top: 1.5rem; }
+details.owner, details.report { margin-top: 1rem; max-width: 46rem; font-size: 0.9rem; }
+details summary { cursor: pointer; color: var(--muted); }
+details form { display: grid; gap: 0.6rem; margin-top: 0.6rem; }
+input[type="text"], input[type="password"], textarea {
+  width: 100%; font: inherit; font-size: 0.95rem; padding: 0.55rem 0.7rem; border: 1px solid var(--line);
+  border-radius: 6px; background: #fff; color: var(--ink);
+}
+.status { min-height: 1.4em; font-size: 0.9rem; }
+.status.ok { color: #2e7d32; } .status.err { color: #b3261e; }
+footer.site { border-top: 1px solid var(--line); color: var(--muted); font-size: 0.85rem; padding: 1.5rem 0; }
+/* Narrow screens: keep the header on one line. */
+.btn, nav.site a.link { white-space: nowrap; }
+@media (max-width: 520px) {
+  .brand-name { font-size: 1.15rem; }
+  nav.site { gap: 0.75rem; }
+  nav.site a.link { display: none; }
+  .btn { padding: 0.5rem 0.8rem; }
+}

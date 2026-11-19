@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "status": "phase 2: consumed by features/ido (delta endpoint) and by ido-core's intake bridge allow-list",
+  "ido_core": {
+    "path_hint": "~/Desktop/GigiApps/ido-app/ido-core",
+    "venture_defs_sql": "supabase/migrations/create_venture_fields.sql",
+    "journey_ts": "src/services/journeyPersonalizer.ts",
+    "migration": "supabase/migrations/venture_voice_intake.sql",
+    "previous_origin_migration": "supabase/migrations/venture_lesson_ingest.sql",
+    "bridge_keys_ts": "src/lib/intake-bridge/protocol.ts"
+  },
+  "new_origin": "voice_intake",
+  "new_venture_fields": [
+    {
+      "key": "funding",
+      "kind": "hypothesis",
+      "label": "Funding",
+      "description": "Planned raise and round, what the money is for, and how long it lasts. Not revenue (how the business earns) and not costs (what it costs to run)."
+    }
+  ],
+  "venture_map": [
+    {
+      "venture_key": "team",
+      "mode": "compose",
+      "sources": [
+        "team.founders_roles",
+        "team.background_expertise",
+        "team.commitment_fulltime"
+      ]
+    },
+    {
+      "venture_key": "problem",
+      "mode": "direct",
+      "sources": [
+        "product.problem"
+      ]
+    },
+    {
+      "venture_key": "solution",
+      "mode": "direct",
+      "sources": [
+        "product.solution"
+      ]
+    },
+    {
+      "venture_key": "uvp",
+      "mode": "direct",
+      "sources": [
+        "product.usp_tech"
+      ],
+      "needs_review": "usp_tech mixes value proposition and technical moat; may need splitting between uvp and unfair"
+    },
+    {
+      "venture_key": "traction",
+      "mode": "compose",
+      "sources": [
+        "traction.customers_pilots",
+        "traction.metrics_revenue",
+        "traction.growth_signal"
+      ]
+    },
+    {
+      "venture_key": "segments",
+      "mode": "direct",
+      "sources": [
+        "market.target_icp"
+      ]
+    },
+    {
+      "venture_key": "market",
+      "mode": "direct",
+      "sources": [
+        "market.market_size"
+      ]
+    },
+    {
+      "venture_key": "unfair",
+      "mode": "direct",
+      "sources": [
+        "market.competitors_moat"
+      ]
+    },
+    {
+      "venture_key": "funding",
+      "mode": "compose",
+      "sources": [
+        "financing.raise_amount_round",
+        "financing.use_of_funds",
+        "financing.runway_milestones"
+      ]
+    }
+  ],
+  "placement_inputs": {
+    "stage": {
+      "from": [
+        "product.stage_status",
+        "traction.customers_pilots",
+        "traction.metrics_revenue"
+      ],
+      "values": [
+        "spark",
+        "shaped",
+        "validated",
+        "building"
+      ]
+    },
+    "experience": {
+      "from": [
+        "team.background_expertise"
+      ],
+      "values": [
+        "first-timer",
+        "explored",
+        "built-before",
+        "founded"
+      ]
+    }
+  },
+  "lesson_evidence": {
+    "defining-the-problem": [
+      "product.problem"
+    ],
+    "crafting-your-elevator-pitch": [
+      "product.usp_tech"
+    ],
+    "conducting-interviews": [
+      "traction.customers_pilots"
+    ],
+    "customer-segments": [
+      "market.target_icp"
+    ],
+    "market-sizing-basics": [
+      "market.market_size"
+    ],
+    "revenue-streams": [
+      "traction.metrics_revenue"
+    ],
+    "pricing-validation": [
+      "traction.metrics_revenue"
+    ],
+    "funding-readiness-check": [
+      "financing.raise_amount_round",
+      "financing.use_of_funds",
+      "financing.runway_milestones"
+    ],
+    "stating-key-assumptions": [
+      "product.solution"
+    ]
+  },
+  "write_rules": {
+    "path": "apply_venture_field_change via src/services/ventureFields.ts setFieldValue(); never a direct table write, never a sixth writer",
+    "status": {
+      "open": "do not write",
+      "partial": "hypothesis",
+      "solid": "hypothesis"
+    },
+    "status_param": "the intake never passes p_status; ido-core defaults apply (verified on Postgres 14): record fields team and traction land locked, hypothesis fields land hypothesis; validation stays a founder decision",
+    "precedence": "voice intake is derived text: it fills an empty field or one whose last origin is voice_intake; a different existing value becomes a review proposal (old / new / manual) in the voice UI",
+    "confidence": "not settable through apply_venture_field_change (no confidence parameter); open question for phase 2"
+  },
+  "notes": {
+    "keys": [
+      "team",
+      "product",
+      "traction",
+      "market",
+      "financing"
+    ],
+    "title_prefix": "Interview · ",
+    "bridge_keys_ts": "src/lib/intake-bridge/protocol.ts",
+    "update_rule": "ido-core updates a card only while its footer checksum still matches its text; an edited card or a card without the footer is the founder's and is never touched",
+    "never_included": [
+      "conversation",
+      "evidence quotes",
+      "scores"
+    ]
+  }
+}

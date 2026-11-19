@@ -8,7 +8,7 @@ browser -> worker   topic ``sv.cmd``      worker -> browser   topic ``sv.evt``
   say {id, text}      one-shot              user_state {state}           speaking|listening|away
   speak_cancel                              agent_state {state}
   config {language}                         speak_done {id, interrupted}
-                                            error {message}
+                                            error {message, scope?}  scope "stt"|"tts" = a provider gave up
 
 The worker never sees the LLM. The browser sends reply text AFTER its own turn pipeline
 produced it (chat.sendText -> /turn/stream), so bubbles, review gate and dossier stay exactly
@@ -133,7 +133,7 @@ class SpeakCoordinator:
         try:
             handle = self._say(stream)
         except Exception as exc:  # session closed / TTS not ready: tell the browser, don't crash
-            self._emit({"t": "error", "message": f"speech failed: {exc}"})
+            self._emit({"t": "error", "scope": "tts", "message": f"speech failed: {exc}"})
             self._emit({"t": "speak_done", "id": sid, "interrupted": True})
             return
         self._current = (sid, stream, handle)

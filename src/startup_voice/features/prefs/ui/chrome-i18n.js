@@ -18,7 +18,8 @@ const STR = {
     dossierEm: "Dossier",
     finalize: "Dossier abschließen",
     clearDossier: "Dossier leeren",
-    deleteSession: "Gespräch löschen",
+    deleteSession: "Gespräch & Dossier löschen",
+    deleteConfirm: "Gespräch und Dossier unwiderruflich löschen? Beides ist danach weg.",
     saveCatalog: "Katalog speichern",
     defaults: "Standard",
     questionCatalog: "Fragenkatalog",
@@ -30,6 +31,8 @@ const STR = {
     finalizeDossier: "Dossier abschließen",
     writeReply: "Antwort schreiben…",
     extractDossier: "Dossier extrahieren",
+    carryDossier: "Dossier mitnehmen",
+    carryConfirm: "Neues leeres Gespräch mit diesem Dossier starten? Der bisherige Chat bleibt erhalten.",
     updatingDossier: "Dossier wird aktualisiert…",
     thinking: "Thinking…",
     processingReply: "Thinking…",
@@ -39,11 +42,15 @@ const STR = {
     noSessions: "Noch keine Gespräche",
     langLabel: "Sprache für STT/TTS und Interview (aktiv + neu)",
     interviewLang: "Interview-Sprache",
+    publishBtn: "Öffentlich teilen…",
+    homeBoardLead: "Ideen, die Gründer:innen öffentlich geteilt haben.",
+    homeBoardEmpty: "Noch nichts veröffentlicht. Du kannst dein Dossier später unter „Öffentlich teilen…“ veröffentlichen.",
+    homeBoardOpen: "Ganzen Board öffnen →",
     // Settings panel (founder-friendly)
     prefsTalkTitle: "Wie möchtest du sprechen?",
     modeClassicTitle: "Antippen & sprechen",
     modeClassicDesc: "Tippe auf „Sprechen“, erzähl, tippe auf „Stopp“. Wie eine Sprachnachricht.",
-    modeLiveTitle: "Freies Gespräch",
+    modeLiveTitle: "Live-Gespräch",
     modeLiveDesc: "Wie ein Telefonat: einfach reden, jederzeit unterbrechen.",
     modeNotSetUp: "Noch nicht eingerichtet",
     autoListenTitle: "Nach der Antwort gleich weiter zuhören",
@@ -89,7 +96,8 @@ const STR = {
     dossierEm: "dossier",
     finalize: "Finalize dossier",
     clearDossier: "Clear dossier",
-    deleteSession: "Delete session",
+    deleteSession: "Delete chat & dossier",
+    deleteConfirm: "Permanently delete this chat and its dossier? Both are removed.",
     saveCatalog: "Save catalog",
     defaults: "Defaults",
     questionCatalog: "Question catalog",
@@ -101,6 +109,8 @@ const STR = {
     finalizeDossier: "Finalize dossier",
     writeReply: "Write a reply…",
     extractDossier: "Extract dossier",
+    carryDossier: "Carry dossier",
+    carryConfirm: "Start a new empty conversation with this dossier? The current chat stays as it is.",
     updatingDossier: "Updating dossier…",
     thinking: "Thinking…",
     processingReply: "Thinking…",
@@ -110,11 +120,15 @@ const STR = {
     noSessions: "No sessions yet",
     langLabel: "Language for STT/TTS and interview (active + new sessions)",
     interviewLang: "Interview language",
+    publishBtn: "Share publicly…",
+    homeBoardLead: "Ideas founders chose to share.",
+    homeBoardEmpty: "Nothing published yet. You can publish your dossier later with “Share publicly…”.",
+    homeBoardOpen: "Open the full board →",
     // Settings panel (founder-friendly)
     prefsTalkTitle: "How do you want to talk?",
     modeClassicTitle: "Tap & talk",
     modeClassicDesc: "Tap “Speak”, tell your story, tap “Stop”. Like a voice message.",
-    modeLiveTitle: "Free conversation",
+    modeLiveTitle: "Live call",
     modeLiveDesc: "Like a phone call: just talk, interrupt any time.",
     modeNotSetUp: "Not set up yet",
     autoListenTitle: "Keep listening after each answer",
@@ -190,6 +204,7 @@ export function applyChromeI18n(lang) {
     && !micBtn.classList.contains("is-extracting")
   ) {
     const pressed = micBtn.getAttribute("aria-pressed") === "true";
-    if (!pressed) micLabel.textContent = t("speak", code);
+    // voice.js owns the wording while a mode (e.g. the live call) overrides it.
+    if (!pressed && !micBtn.dataset.modeLabel) micLabel.textContent = t("speak", code);
   }
 }

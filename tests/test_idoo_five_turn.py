@@ -75,7 +75,8 @@ IDOO_MARKET = (
 
 def _product_full() -> dict:
     return {
-        "problem_solution": "Ideas get lost; iDoo saves + develops them",
+        "problem": "Ideas get lost; iDoo saves + develops them",
+        "solution": "A guided journey that turns the idea into a plan",
         "stage_status": "Product live",
         "usp_tech": "AI idea path + in-app funding apply",
     }
@@ -118,12 +119,14 @@ def _extract_journey_payload() -> str:
                     "summary": "Idea journey → program apply",
                     "evidence": ["idea development journey", "AI fills grant form"],
                     "fields": {
-                        "problem_solution": "Founders don't know next step; journey guides them",
+                        "problem": "Founders don't know next step",
+                        "solution": "Journey guides them step by step",
                         "stage_status": "Live product with phases/lessons",
                         "usp_tech": "Generated journey + match % + AI grant form",
                     },
                     "confidence": {
-                        "problem_solution": 0.92,
+                        "problem": 0.92,
+                        "solution": 0.9,
                         "stage_status": 0.9,
                         "usp_tech": 0.9,
                     },
@@ -304,7 +307,7 @@ def test_build_reply_prompt_ask_now_not_product_when_product_full():
     ask_line = next(ln for ln in user.splitlines() if ln.startswith("ASK_NOW"))
     assert ": team" in ask_line, ask_line
     assert "already_answered" in user
-    assert "product.problem_solution" in user
+    assert "product.problem" in user
 
 
 def test_idoo_turn1_fills_product_then_turn2_leaves_product(tmp_path: Path):

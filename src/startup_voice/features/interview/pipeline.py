@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -29,6 +30,7 @@ from startup_voice.domain import (
     SLOT_ORDER,
     DimensionState,
     InterviewSession,
+    field_label,
     LLM,
     SlotId,
     StepEvaluation,
@@ -78,6 +80,22 @@ GREETING = DEFAULT_GREETING
 
 # Yielded by stream_turn after ReplyDone (SSE status hook for topbar process banner).
 EXTRACT_PHASE = object()
+
+
+def _carry_greeting(session: InterviewSession) -> str:
+    """First line of a carried conversation: dossier is here, name the open gaps."""
+    labels: list[str] = []
+    for item in session.evaluation.missing_fields[:4]:
+        slot, _, key = item.partition(".")
+        if slot in SLOT_ORDER and key:
+            labels.append(field_label(slot, key))  # type: ignore[arg-type]
+    if normalize_language(session.language) == "en":
+        if labels:
+            return "New conversation. The dossier came along. Still open: " + ", ".join(labels) + "."
+        return "New conversation. The dossier came along and looks complete. What should we dig into?"
+    if labels:
+        return "Neues Gespräch. Das Dossier ist übernommen. Offen ist noch: " + ", ".join(labels) + "."
+    return "Neues Gespräch. Das Dossier ist übernommen und sieht vollständig aus. Wobei soll ich nachhaken?"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -144,6 +162,17 @@ class InterviewPipeline:
         self._llm = llm
         self._store = store
         self._config_store = config_store
+        self._extract_locks: dict[str, threading.Lock] = {}
+        self._extract_locks_guard = threading.Lock()
+
+    def _extract_lock(self, session: InterviewSession) -> threading.Lock:
+        """One dossier update at a time per session.
+
+        The next spoken reply does NOT wait for the previous dossier update (the founder keeps
+        talking while it runs); only the updates queue up behind each other, in turn order.
+        """
+        with self._extract_locks_guard:
+            return self._extract_locks.setdefault(session.id, threading.Lock())
 
     def config(self) -> InterviewConfig:
         if self._config_store is not None:
@@ -182,6 +211,27 @@ class InterviewPipeline:
         session = InterviewSession.create(language=language, followup_mode=mode)
         session.messages.append(TurnMessage(role="assistant", content=greeting))
         refresh_evaluation(session)
+        self._store.save(session)
+        return session, greeting
+
+    def carry_dossier(self, source: InterviewSession) -> tuple[InterviewSession, str]:
+        """New conversation with a copy of the dossier and no prior transcript.
+
+        The source session stays as it is. Versions, conflicts and chat do not move.
+        """
+        language = normalize_language(source.language)
+        mode = (source.followup_mode or DEFAULT_FOLLOWUP_MODE).strip().lower()
+        if mode not in FOLLOWUP_MODES:
+            mode = DEFAULT_FOLLOWUP_MODE
+        session = InterviewSession.create(language=language, followup_mode=mode)
+        session.objects = {
+            slot: source.objects[slot].model_copy(deep=True) for slot in SLOT_ORDER
+        }
+        for state in session.objects.values():
+            state.updated_at_turn = 0
+        refresh_evaluation(session)
+        greeting = _carry_greeting(session)
+        session.messages.append(TurnMessage(role="assistant", content=greeting))
         self._store.save(session)
         return session, greeting
 
@@ -436,16 +486,17 @@ class InterviewPipeline:
 
         # ── CALL #2: Silent 5-slot JSON dossier extraction ─────────────────────
         yield EXTRACT_PHASE
-        updated, eval_result = self._run_extract(session, user_text, focus=focus)
-        ext_warn = self._last_llm_warning()
-        if ext_warn and session.messages and session.messages[-1].role == "assistant":
-            prev_w = session.messages[-1].warning
-            session.messages[-1].warning = f"{prev_w} · Extract: {ext_warn}" if prev_w else f"Extract: {ext_warn}"
-        if eval_result.ready_for_closing:
-            offer_end = True
-        self._persist_turn(
-            session, user_text, updated, eval_result, reply, append_reply=False
-        )
+        with self._extract_lock(session):  # waits only for an earlier turn's update, never for a reply
+            updated, eval_result = self._run_extract(session, user_text, focus=focus)
+            ext_warn = self._last_llm_warning()
+            if ext_warn and session.messages and session.messages[-1].role == "assistant":
+                prev_w = session.messages[-1].warning
+                session.messages[-1].warning = f"{prev_w} · Extract: {ext_warn}" if prev_w else f"Extract: {ext_warn}"
+            if eval_result.ready_for_closing:
+                offer_end = True
+            self._persist_turn(
+                session, user_text, updated, eval_result, reply, append_reply=False
+            )
 
     def refresh_dossier_extract(self, session: InterviewSession) -> InterviewSession:
         """On-demand extract: full conversation, focused on open coverage gaps."""
@@ -455,16 +506,17 @@ class InterviewPipeline:
             refresh_evaluation(session)
             self._store.save(session)
             return session
-        updated, eval_result = self._run_extract(
-            session, founder_text, focus="team", full_transcript=True
-        )
-        reply = next(
-            (m.content for m in reversed(session.messages) if m.role == "assistant"),
-            "",
-        )
-        return self._persist_turn(
-            session, founder_text, updated, eval_result, reply, append_reply=False
-        )
+        with self._extract_lock(session):
+            updated, eval_result = self._run_extract(
+                session, founder_text, focus="team", full_transcript=True
+            )
+            reply = next(
+                (m.content for m in reversed(session.messages) if m.role == "assistant"),
+                "",
+            )
+            return self._persist_turn(
+                session, founder_text, updated, eval_result, reply, append_reply=False
+            )
 
     def prepare_extract_only(self, session: InterviewSession) -> dict[str, Any]:
         """Return MISSING_FOCUS + full-transcript prompts for on-demand browser extract."""

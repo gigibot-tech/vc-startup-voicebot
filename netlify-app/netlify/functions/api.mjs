@@ -274,7 +274,7 @@ export default async function handler(request) {
     if (path === "/health" && method === "GET") {
       const sessions = await listSessions();
       const speechReady = Boolean(process.env.ELEVENLABS_API_KEY);
-      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: speechReady ? "elevenlabs" : "browser", stt_providers: speechReady ? ["elevenlabs"] : [], voice_settings: {}, voice_modes: ["classic"], voice_mode: "classic" });
+      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], llm_provider: "openai_compatible", llm_model: process.env.LLM_MODEL || "gpt-4o-mini", voice_settings: {}, voice_modes: ["classic"], voice_mode: "classic" });
     }
     if (path === "/api/dossier-schema" && method === "GET") return json(schemaResponse());
     if (path === "/api/ido/config" && method === "GET") return json({ origins: String(process.env.IDO_ORIGINS || "").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean) });

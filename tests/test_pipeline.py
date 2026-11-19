@@ -38,7 +38,7 @@ class StubExtractLLM:
                             "summary": "MVP live",
                             "evidence": ["MVP live"],
                             "fields": {
-                                "problem_solution": "SaaS Produkt",
+                                "problem": "SaaS Produkt",
                                 "stage_status": "MVP live",
                                 "usp_tech": "",
                             },
@@ -132,7 +132,7 @@ def test_fill_and_evaluate_writes_objects_and_steps(tmp_path: Path):
     assert (base / "steps" / "turn_01.json").exists()
     assert (base / "dossier.md").exists()
     assert session.objects["team"].fields["founders_roles"] == "CEO und CTO"
-    assert "Seed" not in (session.objects["product"].fields.get("problem_solution") or "")
+    assert "Seed" not in (session.objects["product"].fields.get("problem") or "")
     assert session.objects["financing"].fields["raise_amount_round"] == "Seed 1.5M"
 
     team_eval = evaluate_artifact_file(base / "objects" / "team.json")
@@ -314,6 +314,45 @@ def test_german_session_keeps_configured_greeting_and_prompt(tmp_path: Path):
     assert "LANGUAGE OVERRIDE" not in llm.systems[-1]
     pipe.finalize_session(session)
     assert "in German" in llm.systems[-1]
+
+
+def test_carry_dossier_starts_clean_chat_with_same_fields(tmp_path: Path):
+    pipe = InterviewPipeline(StubExtractLLM(), FileSessionStore(tmp_path))
+    source, _ = pipe.start_session()
+    source.objects["financing"].fields["raise_amount_round"] = "200k Preseed"
+    source.objects["financing"].summary = "Preseed 200k"
+    source.messages.append(TurnMessage(role="user", content="preseed 200k und 3 Uni-Campusse"))
+    source.turn_index = 4
+    source.finalized = True
+    pipe._store.save(source)
+
+    carried, greeting = pipe.carry_dossier(source)
+    assert carried.id != source.id
+    assert carried.turn_index == 0
+    assert carried.finalized is False
+    assert carried.dossier_versions == []
+    assert len(carried.messages) == 1
+    assert carried.messages[0].role == "assistant"
+    assert "übernommen" in greeting
+    assert carried.objects["financing"].fields["raise_amount_round"] == "200k Preseed"
+    reloaded = pipe._store.load(source.id)
+    assert reloaded.turn_index == 4
+    assert any(m.role == "user" for m in reloaded.messages)
+    fresh = pipe._store.load(carried.id)
+    assert fresh.objects["team"].fields["founders_roles"] == ""
+
+
+def test_api_carry_dossier(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    client = TestClient(create_app(llm=StubExtractLLM()))
+    sid = client.post("/api/sessions").json()["session"]["id"]
+    r = client.post(f"/api/sessions/{sid}/carry")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["carried_from"] == sid
+    assert body["session"]["id"] != sid
+    assert body["session"]["messages"][0]["role"] == "assistant"
+    assert client.get(f"/api/sessions/{sid}").json()["id"] == sid
 
 
 def test_api_start_session_language_and_tts_language(tmp_path: Path, monkeypatch):
@@ -573,7 +612,8 @@ def test_on_demand_extract_focuses_lowest_coverage_gaps(tmp_path: Path):
         "commitment_fulltime": "Vollzeit",
     }
     session.objects["product"].fields = {
-        "problem_solution": "SaaS für Unis",
+        "problem": "SaaS für Unis",
+        "solution": "Self-Service-Plattform für Studierende",
         "stage_status": "MVP live",
         "usp_tech": "",
     }
@@ -585,7 +625,7 @@ def test_on_demand_extract_focuses_lowest_coverage_gaps(tmp_path: Path):
     gaps = build_missing_focus(session)
     assert [g["slot"] for g in gaps] == ["traction", "market", "product"]
     assert gaps[0]["coverage"] == 0.0
-    assert gaps[-1]["coverage"] == round(2 / 3, 3)
+    assert gaps[-1]["coverage"] == round(3 / 4, 3)  # product has 4 fields: problem, solution, stage, usp
     assert "usp_tech" in gaps[-1]["missing"]
     prompt = build_extract_user(session, "irgendwas", "team", full_transcript=True)
     assert "MISSING_FOCUS" in prompt
@@ -652,3 +692,50 @@ def test_api_extract_dossier_uses_full_conversation(tmp_path: Path, monkeypatch)
     assert "Full conversation transcript" in CaptureLLM.last_user
     assert "zwei Gründer" in CaptureLLM.last_user
     assert "MVP live" in CaptureLLM.last_user
+
+
+def test_next_reply_does_not_wait_for_the_previous_dossier_update(tmp_path: Path):
+    """The founder keeps talking while the dossier updates: reply #2 finishes while update #1 still runs,
+    and the updates themselves stay in turn order."""
+    import threading
+
+    from startup_voice.features.interview.pipeline import EXTRACT_PHASE, ReplyDone
+
+    release_first = threading.Event()
+    extract_started = threading.Event()
+    log: list[str] = []
+
+    class SlowFirstExtract(StreamingStubLLM):
+        def complete(self, system: str, user: str, *, max_tokens: int | None = None, **kw) -> str:
+            if "json only" in system.lower() or "extract" in system.lower():
+                log.append("extract-start")
+                if len(log) == 1:
+                    extract_started.set()
+                    assert release_first.wait(10), "update #1 was never released"
+                log.append("extract-end")
+            return super().complete(system, user, max_tokens=max_tokens)
+
+    pipe = InterviewPipeline(SlowFirstExtract(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session()
+    first = threading.Thread(target=lambda: list(pipe.stream_turn(session, "Erste Antwort.")))
+    first.start()
+    assert extract_started.wait(10)
+
+    seen: list = []
+    second_reply_done = threading.Event()
+
+    def second_turn():
+        for item in pipe.stream_turn(session, "Zweite Antwort."):
+            seen.append(item)
+            if isinstance(item, ReplyDone):
+                second_reply_done.set()
+
+    second = threading.Thread(target=second_turn)
+    second.start()
+    assert second_reply_done.wait(5), "reply #2 must not wait for update #1"
+    assert log == ["extract-start"], "update #2 must queue behind update #1"
+    release_first.set()
+    first.join(10)
+    second.join(10)
+    assert EXTRACT_PHASE in seen
+    assert log == ["extract-start", "extract-end", "extract-start", "extract-end"]

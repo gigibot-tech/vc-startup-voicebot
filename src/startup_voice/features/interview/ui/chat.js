@@ -53,6 +53,7 @@ export function createChat({ voice, sessions }) {
 
   /** @type {AbortController|null} */
   let turnAbort = null;
+  let turnGen = 0; // bumps per server turn: an older turn's late `done` must not repaint over a newer one
   /** @type {Promise<void>|null} Resolves when the previous turn's background dossier extract finishes. */
   let inFlightExtractPromise = null;
 
@@ -730,33 +731,17 @@ export function createChat({ voice, sessions }) {
     // Persist user line before paint so renderChat order is: … → Du → thinking bubble.
     ensureTrailingUser(session, trimmed);
     hideIntakeEnd();
-    const de = String(session.language || "de").toLowerCase().startsWith("de");
-    const waitingForExtract = Boolean(inFlightExtractPromise);
-    appState.turnHint = waitingForExtract
-      ? (de ? "Wartet kurz auf Dossier-Update…" : "Waiting for dossier update…")
-      : "Thinking…";
+    // The dossier update of the previous turn runs on the server in the background: the next reply
+    // does NOT wait for it (STT, thinking and TTS stay free). Updates queue up server-side.
+    appState.turnHint = "Thinking…";
     setLoading(true, "turn");
     voice.stopMicCapture({ keepPhase: true });
     voice.stopSpeak();
     voice.beginSpeakStream?.();
     voice.setVoicePhase("thinking");
     let thinking = showThinkingBubble(appState.turnHint);
-
-    // If the previous turn is still updating the dossier in the background, WAIT for it to
-    // finish instead of aborting it — so the new reply sees the freshly updated dossier!
-    if (inFlightExtractPromise) {
-      try { await inFlightExtractPromise; } catch { /* ignore */ }
-      if (nav.isStale(seq, id)) {
-        removeThinking(thinking);
-        nav.turnBusy = false;
-        setLoading(false);
-        return;
-      }
-      session = activeSession() || session;
-      ensureTrailingUser(session, trimmed);
-      appState.turnHint = "Thinking…";
-      thinking = showThinkingBubble(appState.turnHint);
-    }
+    const myGen = (turnGen += 1);
+    const newerTurnRunning = () => myGen !== turnGen;
 
     // Header: Thinking… first; Switching to Updating dossier… only after reply unlock.
     showProcessBusy("turn", id, t("thinking", session.language || "de"));
@@ -827,6 +812,7 @@ export function createChat({ voice, sessions }) {
           }
           if (name === "status") {
             if (d.phase === "extract") {
+              if (newerTurnRunning()) return; // the newer turn owns the banner and the status line
               const msg = d.message || t("updatingDossier", session.language || "de");
               showProcessBusy("extract", id, msg);
               // Do NOT overwrite voiceStatus if TTS is currently speaking!
@@ -860,6 +846,11 @@ export function createChat({ voice, sessions }) {
         hideProcessBusy();
         return;
       }
+      if (newerTurnRunning()) {
+        // Only this turn's dossier update was still running; the founder already talks on.
+        // The newer turn paints the session when it finishes (it includes this update).
+        return;
+      }
       if (!data.session || data.session.id !== id) {
         removeThinking(thinking);
         hideProcessBusy();
@@ -881,6 +872,8 @@ export function createChat({ voice, sessions }) {
       hideProcessBusy();
     } catch (err) {
       removeThinking(thinking);
+      // A newer turn already talks on: its UI (banner, phase) is not ours to clear.
+      if (newerTurnRunning()) return;
       hideProcessBusy();
       // Superseded by a newer send — leave UI to the new turn.
       if (turnAbort !== myAbort && turnAbort !== null) return;

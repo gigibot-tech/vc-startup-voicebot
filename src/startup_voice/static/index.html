@@ -66,7 +66,10 @@
           <button type="button" class="mode-card" role="radio" data-mode="livekit" aria-checked="false">
             <span class="mode-card__icon" aria-hidden="true">📞</span>
             <span class="mode-card__text">
-              <strong data-i18n="modeLiveTitle">Freies Gespräch</strong>
+              <strong><span data-i18n="modeLiveTitle">Live-Gespräch</span>
+                <span class="mode-card__by" title="LiveKit">
+                  <svg viewBox="0 0 16 16" class="mode-pill__logo" aria-hidden="true"><rect x="1.5" y="6" width="3" height="8" rx="1.5"/><rect x="6.5" y="2" width="3" height="12" rx="1.5"/><rect x="11.5" y="5" width="3" height="6" rx="1.5"/></svg>by LiveKit</span>
+              </strong>
               <span data-i18n="modeLiveDesc">Wie ein Telefonat: einfach reden, jederzeit unterbrechen.</span>
               <em class="mode-card__badge" id="modeLiveBadge" hidden data-i18n="modeNotSetUp">Noch nicht eingerichtet</em>
             </span>
@@ -248,11 +251,24 @@
               </div>
             </div>
           </section>
-          <section class="chat-home" id="chatHome">
-            <h3 data-i18n="chooseSession">Gespräch wählen</h3>
-            <p class="lead" data-i18n="chooseSessionLead">Bestehendes Gespräch öffnen oder neu starten — ohne sofort Sprache.</p>
-            <div class="home-list" id="homeSessionList"></div>
-          </section>
+          <div class="home-row" id="homeRow">
+            <section class="chat-home" id="chatHome">
+              <h3 data-i18n="chooseSession">Gespräch wählen</h3>
+              <p class="lead" data-i18n="chooseSessionLead">Bestehendes Gespräch öffnen oder neu starten — ohne sofort Sprache.</p>
+              <div class="home-list" id="homeSessionList"></div>
+            </section>
+            <section class="home-board" id="homeBoard" aria-labelledby="homeBoardTitle">
+              <div class="hb-head">
+                <h3 id="homeBoardTitle">Idea Board</h3>
+                <span class="hb-by">by <img src="/static/features/board/ido-logo.svg" alt="iDO!" /></span>
+              </div>
+              <p class="lead" data-i18n="homeBoardLead">Ideen, die Gründer:innen öffentlich geteilt haben.</p>
+              <div class="hb-list" id="homeBoardList"></div>
+              <p class="hb-empty" id="homeBoardEmpty" hidden data-i18n="homeBoardEmpty">Noch nichts veröffentlicht. Du kannst dein Dossier später unter „Öffentlich teilen…“ veröffentlichen.</p>
+              <a class="hb-link" href="/board" target="_blank" rel="noopener" data-i18n="homeBoardOpen">Ganzen Board öffnen →</a>
+              <span class="hb-more" id="homeBoardMore" hidden></span>
+            </section>
+          </div>
           <section class="qa-list" id="qaList" aria-live="polite"></section>
           <div class="speak-dock" id="speakDock">
             <button class="mic-btn mic-btn--chat" type="button" id="micBtn" aria-pressed="false">
@@ -319,8 +335,10 @@
             <a class="pill-outline" id="downloadMd" href="#" download title="Markdown">Markdown</a>
             <a class="pill-outline" id="downloadPdf" href="#" download title="PDF">PDF</a>
             <a class="pill-outline" id="downloadJson" href="#" download title="session.json">JSON</a>
+            <button class="pill-outline" type="button" id="publishBtn" data-i18n="publishBtn">Öffentlich teilen…</button>
+            <button class="pill-outline" type="button" id="carryBtn" data-i18n="carryDossier">Dossier mitnehmen</button>
             <button class="pill-outline" type="button" id="clearBtn" data-i18n="clearDossier">Dossier leeren</button>
-            <button class="pill-outline danger" type="button" id="deleteBtn" data-i18n="deleteSession">Gespräch löschen</button>
+            <button class="pill-outline danger" type="button" id="deleteBtn" data-i18n="deleteSession">Gespräch &amp; Dossier löschen</button>
           </div>
           <div class="finalize-block" id="finalizeBlock">
             <button class="pill" type="button" id="finalizeBtn" data-i18n="finalize">Dossier abschließen</button>
@@ -331,13 +349,23 @@
             <strong data-i18n="finalize">Dossier abschließen</strong> = Zusammenfassung + fertig.
             <strong>Markdown / PDF / JSON</strong> = Export.
             <strong data-i18n="clearDossier">Dossier leeren</strong> = Felder zurücksetzen.
-            <strong data-i18n="deleteSession">Gespräch löschen</strong> = Chat + Dateien entfernen.
+            <strong data-i18n="deleteSession">Gespräch &amp; Dossier löschen</strong> = Konversation und Dossier weg.
           </p>
         </div>
       </aside>
     </div>
   </div>
 
+  <dialog id="publishDialog" class="pub-dialog" aria-labelledby="publishTitle">
+    <h2 id="publishTitle">Öffentlich teilen</h2>
+    <div id="publishBody"></div>
+    <p class="pub-status" id="publishStatus" role="status"></p>
+    <div class="pub-actions">
+      <button class="pill" type="button" id="publishSubmit" hidden>Veröffentlichen</button>
+      <button class="pill-outline danger" type="button" id="publishWithdraw" hidden>Zurückziehen</button>
+      <button class="pill-outline" type="button" id="publishClose">Schließen</button>
+    </div>
+  </dialog>
   <script type="module" src="/static/app.js"></script>
 </body>
 </html>

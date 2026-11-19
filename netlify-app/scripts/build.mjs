@@ -11,7 +11,7 @@ await rm(out, { recursive: true, force: true });
 await mkdir(resolve(out, "static/features"), { recursive: true });
 await cp(resolve(source, "static/index.html"), resolve(out, "index.html"));
 await cp(resolve(source, "static"), resolve(out, "static"), { recursive: true });
-for (const feature of ["dossier", "voice", "sessions", "prefs", "interview", "ido"]) {
+for (const feature of ["dossier", "voice", "sessions", "prefs", "interview", "ido", "board"]) {
   const from = resolve(source, "features", feature, "ui");
   try {
     await cp(from, resolve(out, "static/features", feature), { recursive: true });

@@ -15,10 +15,13 @@
  *     POST /api/sessions/{id}/finalize   (calls the LLM once, for the spoken summary)
  *     On success the app returns to the conversation picker.
  *
+ * [Dossier mitnehmen]   #carryBtn     -> carryDossier()
+ *     POST /api/sessions/{id}/carry   (new chat, same dossier, old chat stays)
+ *
  * [Dossier leeren]      #clearBtn     -> clear handler
  *     confirm(), then POST /api/sessions/{id}/clear   (no LLM; chat stays, slots emptied)
  *
- * [Gespräch löschen]    #deleteBtn    -> delete handler
+ * [Gespräch & Dossier löschen] #deleteBtn -> delete handler
  *     confirm(), then DELETE /api/sessions/{id}       (removes the session folder on disk)
  *
  * [Markdown] [PDF] [JSON] are plain <a href download> links; render.js sets their href.
@@ -150,6 +153,32 @@ export function createDossierActions({ voice, sessions, repaintList, chat }) {
     });
   }
 
+  async function carryDossier() {
+    const id = activeId();
+    const session = activeSession();
+    if (!id || !session) return;
+    if ((appState.processBusy || appState.loading) && !sessions.guardInterrupt()) return;
+    const lang = session.language || "de";
+    if (!confirm(t("carryConfirm", lang))) return;
+    const seq = nav.seq;
+    voice.setStatus(lang === "en" ? "Starting a new conversation…" : "Neues Gespräch wird angelegt…");
+    let data;
+    try {
+      data = await api(`/api/sessions/${id}/carry`, { method: "POST", body: "{}" });
+    } catch (err) {
+      voice.setVoicePhase("idle", `Carry failed — ${String(err.message || err).slice(0, 120)}`);
+      return;
+    }
+    if (nav.isStale(seq, id) || !data.session?.id) return;
+    document.getElementById("app")?.classList.add("awaiting-greeting");
+    sessions.commitSession(data.session, {
+      status: lang === "en" ? "Listening to greeting…" : "Begrüßung wird vorgelesen…",
+      speakLast: true,
+    });
+    try { await sessions.refreshPicker(); }
+    catch { /* list refresh is optional */ }
+  }
+
   async function clearDossier() {
     const id = activeId();
     if (!id || !activeSession()) return;
@@ -227,7 +256,8 @@ export function createDossierActions({ voice, sessions, repaintList, chat }) {
     const id = activeId();
     if (!id || !activeSession()) return;
     if (appState.processBusy && !sessions.guardInterrupt()) return;
-    if (!confirm("Permanently delete this session and dossier?")) return;
+    const lang = activeSession()?.language || "de";
+    if (!confirm(t("deleteConfirm", lang))) return;
     await api(`/api/sessions/${id}`, { method: "DELETE" });
     await sessions.refreshPicker();
     sessions.goPicker({ status: "Session deleted — please choose", force: true });
@@ -235,6 +265,7 @@ export function createDossierActions({ voice, sessions, repaintList, chat }) {
 
   function bind() {
     document.getElementById("finalizeBtn").addEventListener("click", () => finalize());
+    document.getElementById("carryBtn")?.addEventListener("click", () => { void carryDossier(); });
     document.getElementById("clearBtn").addEventListener("click", clearDossier);
     document.getElementById("deleteBtn").addEventListener("click", deleteSession);
     document.getElementById("dossierExtractBtn")?.addEventListener("click", () => {

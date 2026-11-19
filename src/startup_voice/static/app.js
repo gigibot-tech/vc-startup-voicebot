@@ -22,8 +22,12 @@ import { createVoice } from "./features/voice/voice.js";
 import { createLiveKitVoice } from "./features/voice/voice-livekit.js";
 import { createVoiceSwitch } from "./features/voice/voice-mode.js";
 import { createMicListener, resampleTo16k } from "./features/voice/browser-listen.js";
+import { applyAvailability } from "./features/prefs/availability.js";
+import { createWebSpeechListener, isWebSpeechSupported } from "./features/voice/web-speech-listen.js";
 import { createCues } from "./features/voice/cues.js";
 import { createIdoBridge } from "./features/ido/ido-bridge.js";
+import { createPublishDialog } from "./features/board/publish.js";
+import { createHomeBoard } from "./features/board/home-board.js";
 import { prefs, savePrefs } from "./features/prefs/prefs.js";
 import { createSettings } from "./features/prefs/settings.js";
 import { createSessions, readUrlSessionId, syncUrl } from "./features/sessions/lifecycle.js";
@@ -96,6 +100,12 @@ const livekitVoice = createLiveKitVoice({
     prepare: () => modelManager.ensureLoaded("whisper"),
     createListener: createMicListener,
     transcribe: (samples, rate, lang) => modelManager.transcribe(resampleTo16k(samples, rate), lang),
+  },
+  // Settings > STT = "Browser (Web Speech)": the browser's own recognizer, no download.
+  webSpeech: {
+    isSupported: () => isWebSpeechSupported(),
+    isEnabled: () => prefs.stt === "browser" && isWebSpeechSupported(),
+    create: createWebSpeechListener,
   },
 });
 let serverVoiceMode = "classic";
@@ -335,6 +345,9 @@ function renderView() {
     if (end) end.hidden = true;
   }
   $("chatHome").hidden = !picking;
+  $("homeBoard").hidden = !picking;
+  $("homeRow").hidden = !picking;
+  if (picking) void homeBoard.refresh();
   const heroStart = $("heroStart");
   if (heroStart) heroStart.hidden = !picking;
   const key = chatPaintKey();
@@ -365,6 +378,11 @@ function renderView() {
   if (!picking) chat.syncIntakeEnd?.(activeSession());
   paintProcessBanner();
 }
+
+/** Public Idea Board: publish parts of the dossier (features/board). Nothing is public until the founder does it. */
+const homeBoard = createHomeBoard({ api, getLanguage: currentLanguage });
+const publishDialog = createPublishDialog({ api, getSessionId: activeId, getLanguage: currentLanguage });
+publishDialog.bind();
 
 /** Only does anything when this page runs inside ido-core's iframe (see features/ido). */
 const idoBridge = createIdoBridge({
@@ -409,11 +427,20 @@ async function boot() {
       voice.setProviders(Array.isArray(health.stt_providers) && health.stt_providers.length
         ? health.stt_providers
         : [health.stt || "browser"]);
+      // Default = the browser's own recognizer (Whisper where Web Speech is missing). A cloud provider
+      // is only used when the founder picked it AND the server still offers it (key + credits).
+      const localStt = isWebSpeechSupported() ? "browser" : "whisper";
+      const providers = Array.isArray(health.stt_providers) ? health.stt_providers : [];
+      const isCloud = (v) => v === "elevenlabs" || v === "deepgram";
       if (prefs.stt === "auto" || !prefs.stt) {
         const server = health.stt;
-        prefs.stt = (server && server !== "browser") ? server : voice.resolveSttProvider();
+        prefs.stt = (server && server !== "browser" && isCloud(server)) ? server : localStt;
+        savePrefs();
+      } else if (isCloud(prefs.stt) && !providers.includes(prefs.stt)) {
+        prefs.stt = localStt; // chosen earlier, but out of credits / no key now
         savePrefs();
       }
+      if (applyAvailability({ prefs, health, hostname: location.hostname })) { savePrefs(); settings.paint(); }
       voice.applySttProvider();
       settings.syncToneUi();
       serverVoiceMode = health.voice_mode || "classic";

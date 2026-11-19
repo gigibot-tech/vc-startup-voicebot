@@ -17,7 +17,7 @@ const TTS_LABELS = {
 };
 
 const SLOT_META = {
-  whisper: { badge: "Whisper Tiny · WASM · q8", task: "STT" },
+  whisper: { badge: "Whisper Small · WASM · q8", task: "STT" },
   llm: { badge: LLM_LABELS["granite-3b"], task: "LLM" },
   tts: { badge: TTS_LABELS.de, task: "TTS" },
 };

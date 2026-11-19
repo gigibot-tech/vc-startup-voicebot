@@ -87,6 +87,7 @@
  */
 import { api } from "../../shared/api.js";
 import { clampSpeed, fmtTime, langTag } from "../../shared/format.js";
+import { createNoiseGate } from "./wave-gate.js";
 
 const PREFLIGHT_TTL_MS = 20000;
 
@@ -167,6 +168,69 @@ export function createVoice({
     if (bar) bar.hidden = !listening;
   };
   let extractBusyInDock = false;
+  /**
+   * Which speak mode is active, made visible. `modeUi` comes from the selected driver (voice-mode.js):
+   *   { pill: {de, en, live, connecting, icon, agent}, labels: { idle|listening|speaking: {de, en, titleDe, titleEn} }, stop: {de, en} }
+   * null = classic push-to-talk. The pill sits next to the mic button, so it is obvious which button
+   * you are pressing: "Antippen & sprechen" (classic) or "Live-Gespräch" (LiveKit).
+   */
+  let modeUi = null;
+  const CLASSIC_PILL = { de: "🎙️ Antippen & sprechen", en: "🎙️ Tap & talk", live: false };
+
+  /** Small LiveKit-style mark (three rounded bars) drawn in currentColor, so it follows the pill colour. */
+  function livekitMark() {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("class", "mode-pill__logo");
+    svg.setAttribute("aria-hidden", "true");
+    [[1.5, 6, 3, 8], [6.5, 2, 3, 12], [11.5, 5, 3, 6]].forEach(([x, y, w, h]) => {
+      const bar = document.createElementNS(NS, "rect");
+      bar.setAttribute("x", x); bar.setAttribute("y", y);
+      bar.setAttribute("width", w); bar.setAttribute("height", h); bar.setAttribute("rx", 1.5);
+      svg.appendChild(bar);
+    });
+    return svg;
+  }
+
+  function syncModePill(de) {
+    const dock = document.getElementById("speakDock");
+    if (!dock) return;
+    let pill = document.getElementById("modePill");
+    if (!pill) {
+      pill = document.createElement("span");
+      pill.id = "modePill";
+      pill.className = "mode-pill";
+      pill.setAttribute("role", "status");
+      dock.prepend(pill);
+    }
+    const p = modeUi?.pill || CLASSIC_PILL;
+    const lang = de ? "de" : "en";
+    // In a call, say what the LiveKit agent is doing right now (listening / thinking / speaking).
+    const doing = p.live ? p.agent?.[voicePhase]?.[lang] : "";
+    const text = doing ? `${p[lang]} · ${doing}` : p[lang];
+    const key = `${p.icon || ""}|${text}`;
+    if (pill.dataset.key !== key) { // rebuild only on change (this runs on every phase tick)
+      pill.dataset.key = key;
+      pill.replaceChildren();
+      if (p.icon === "livekit") pill.appendChild(livekitMark());
+      if (p.live) {
+        const dot = document.createElement("i");
+        dot.className = "mode-pill__dot";
+        pill.appendChild(dot);
+      }
+      pill.appendChild(document.createTextNode(text));
+    }
+    pill.classList.toggle("is-live", Boolean(p.live));
+    pill.classList.toggle("is-connecting", Boolean(p.connecting));
+    pill.dataset.mode = modeUi ? "livekit" : "classic";
+  }
+
+  function setModeUi(next) {
+    modeUi = next || null;
+    syncMicLabels();
+  }
+
   const syncMicLabels = () => {
     const de = String(getLanguage?.() || "de").toLowerCase().startsWith("de");
     const dock = document.getElementById("speakDock");
@@ -195,6 +259,16 @@ export function createVoice({
         ? "Jetzt schon sprechen (Dossier-Update läuft im Hintergrund weiter)"
         : "Speak now (dossier update continues in background)";
     }
+    // Mode-specific wording (e.g. "Auflegen" in a live call instead of "Stopp").
+    const phaseKey = voicePhase === "idle" ? "idle" : voicePhase;
+    const o = modeUi?.labels?.[phaseKey];
+    if (o) {
+      label = de ? o.de : o.en;
+      title = de ? o.titleDe : o.titleEn;
+    }
+    syncModePill(de);
+    const stopBtn = document.getElementById("listenStopBtn");
+    if (stopBtn && modeUi?.stop) stopBtn.textContent = de ? modeUi.stop.de : modeUi.stop.en;
     dock?.classList.toggle("is-thinking", thinking);
     dock?.classList.toggle("is-speaking", speaking);
     dock?.classList.toggle("is-extracting", extracting);
@@ -204,7 +278,13 @@ export function createVoice({
       btn.classList.toggle("is-speaking", speaking);
       btn.classList.toggle("is-extracting", extracting && !live && !speaking && !thinking);
       btn.classList.toggle("recording", live);
+      if (o) btn.dataset.modeLabel = "1"; else delete btn.dataset.modeLabel;
       const labelEl = btn.querySelector(".mic-btn__label");
+      // The generic i18n pass rewrites every [data-i18n] text: step aside while a mode owns the wording.
+      if (labelEl) {
+        if (o) labelEl.removeAttribute("data-i18n");
+        else if (!labelEl.hasAttribute("data-i18n")) labelEl.setAttribute("data-i18n", "speak");
+      }
       if (labelEl) labelEl.textContent = label;
       else btn.textContent = label;
       btn.setAttribute("aria-pressed", live || speaking || thinking ? "true" : "false");
@@ -219,6 +299,13 @@ export function createVoice({
     syncMicLabels();
   };
   const setVoicePhase = (phase, statusText) => {
+    // In a live call "nothing is playing" means "mic open, listening", never "idle": the classic voice
+    // (browser TTS fallback) sets idle on its own when it finishes, which used to leave the button on
+    // "Live-Gespräch starten" while the pill still said LIVE.
+    if (phase === "idle" && modeUi?.idleAs) {
+      phase = modeUi.idleAs;
+      queueMicrotask(() => modeUi?.onIdle?.());
+    }
     voicePhase = phase;
     const listening = phase === "listening";
     const speaking = phase === "speaking";
@@ -304,6 +391,8 @@ export function createVoice({
       waveAnalyser.fftSize = 256;
       source.connect(waveAnalyser);
       const data = new Uint8Array(waveAnalyser.frequencyBinCount);
+      const wave = new Uint8Array(waveAnalyser.fftSize);
+      const gate = createNoiseGate();
       const draw = () => {
         waveRaf = requestAnimationFrame(draw);
         if (!waveAnalyser) return;
@@ -313,19 +402,22 @@ export function createVoice({
         const w = canvas.width;
         const h = canvas.height;
         c.clearRect(0, 0, w, h);
-        let sum = 0;
-        for (let i = 0; i < data.length; i++) sum += data[i];
-        setMicLevel((sum / data.length / 255) * 2.4);
+        // Loudness of this frame, gated: room hum keeps the bars flat and the orb still.
+        waveAnalyser.getByteTimeDomainData(wave);
+        let sq = 0;
+        for (let i = 0; i < wave.length; i++) { const v = (wave[i] - 128) / 128; sq += v * v; }
+        const open = gate.update(Math.sqrt(sq / wave.length), voicePhase === "speaking");
+        setMicLevel(open);
         const bars = 28;
         const gap = 2;
         const bw = (w - gap * (bars - 1)) / bars;
         for (let i = 0; i < bars; i++) {
           const idx = Math.floor((i / bars) * data.length);
-          const mag = data[idx] / 255;
+          const mag = open > 0 ? data[idx] / 255 : 0;
           const bh = Math.max(3, mag * h * 0.92);
           const x = i * (bw + gap);
           const y = (h - bh) / 2;
-          c.fillStyle = `rgba(180, 40, 90, ${0.35 + mag * 0.55})`;
+          c.fillStyle = `rgba(30, 150, 160, ${0.35 + mag * 0.55})`;
           c.fillRect(x, y, bw, bh);
         }
       };
@@ -522,6 +614,8 @@ export function createVoice({
   function afterSpeak() {
     clearAwaitingGreeting();
     if (voicePhase === "speaking") setVoicePhase("idle");
+    // In a live call the mic is already open: classic push-to-talk must not start on top of it.
+    if (modeUi?.idleAs) return;
     // You can speak while dossier extract runs in the background!
     if (prefs.auto && canListen()) startListening();
   }
@@ -713,8 +807,9 @@ export function createVoice({
         return;
       }
     }
+    if (gen !== speakGen) return; // stopSpeak() already reset the pump; a newer one may be running
     speakPumping = false;
-    if (gen === speakGen && !speakStreamOn && !speakQueue.length) afterSpeak();
+    if (!speakStreamOn && !speakQueue.length) afterSpeak();
   }
 
   function enqueueSpeak(text) {
@@ -1205,6 +1300,7 @@ export function createVoice({
     setVoicePhase,
     setExtractBusy,
     syncMicLabels,
+    setModeUi,
     // live-listening visuals, reused by the LiveKit driver (additive: not part of the driver contract)
     paintSttPreview,
     clearLiveBubble,

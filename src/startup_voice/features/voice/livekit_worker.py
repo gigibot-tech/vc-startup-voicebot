@@ -145,6 +145,25 @@ def pick_turn_detection():
     return "vad"
 
 
+def describe_voice_error(scope: str, detail: str, language: str = "de") -> str:
+    """One founder-readable sentence for a failed STT/TTS provider (the raw error is for the log).
+
+    ``scope``: "stt" | "tts". Quota / billing / key problems are the ones people can actually fix.
+    """
+    de = language.startswith("de")
+    low = detail.lower()
+    what = ("die Spracherkennung" if de else "speech recognition") if scope == "stt" else (
+        "die Stimme" if de else "the voice")
+    if "quota" in low or "exceeded" in low or "credit" in low or "payment" in low:
+        return (f"Das Kontingent des Sprachanbieters ist aufgebraucht – {what} geht gerade nicht."
+                if de else f"The speech provider's quota is used up - {what} is unavailable right now.")
+    if "401" in low or "unauthorized" in low or "invalid api key" in low or "api key" in low:
+        return (f"API-Schlüssel des Sprachanbieters abgelehnt – {what} geht nicht."
+                if de else f"The speech provider rejected the API key - {what} is unavailable.")
+    return (f"Der Sprachanbieter antwortet nicht - {what} geht gerade nicht."
+            if de else f"The speech provider is not responding - {what} is unavailable.")
+
+
 class VoiceIOAgent(Agent):
     """No LLM: when the founder's turn ends, hand the transcript to the browser and stop there."""
 
@@ -223,6 +242,20 @@ async def entrypoint(ctx: JobContext) -> None:
     def _on_words(ev) -> None:
         if not ev.is_final and ev.transcript.strip():
             emit({"t": "interim", "text": ev.transcript})
+
+    reported: set[str] = set()
+
+    @session.on("error")
+    def _on_error(ev) -> None:
+        """A provider gave up (quota, key, outage). Tell the browser: it used to hang on 'thinking'."""
+        err = ev.error
+        scope = {"stt_error": "stt", "tts_error": "tts"}.get(getattr(err, "type", ""), "")
+        if not scope or getattr(err, "recoverable", True) or scope in reported:
+            return
+        reported.add(scope)
+        detail = str(getattr(err, "error", err))
+        log.error("voice worker %s failed for good: %s", scope, detail)
+        emit({"t": "error", "scope": scope, "message": describe_voice_error(scope, detail, language)})
 
     @session.on("user_state_changed")
     def _on_user_state(ev) -> None:

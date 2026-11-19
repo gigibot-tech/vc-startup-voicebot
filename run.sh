@@ -42,6 +42,13 @@ if [ "$PROVIDER" = "ollama" ]; then
   echo "$tags" | grep -q "\"name\":\"$MODEL\"" \
     || die "Model '$MODEL' not installed. Run: ollama pull $MODEL   (or set LLM_MODEL)"
   ok "model $MODEL installed"
+  # A model Ollama has unloaded (overnight, after idle) takes several seconds to load; the app's
+  # startup ping only waits LLM_PROBE_TIMEOUT (8 s) and would refuse to start. Load it first.
+  echo "… loading $MODEL into memory (the first start of the day can take a minute)"
+  curl -fsS -m 180 "$BASE/api/generate" \
+    -d "{\"model\":\"$MODEL\",\"prompt\":\"ok\",\"stream\":false,\"keep_alive\":\"1h\",\"options\":{\"num_predict\":1}}" \
+    >/dev/null 2>&1 \
+    && ok "model $MODEL loaded" || echo "! could not pre-load $MODEL (the app will try anyway)"
 else
   echo "! LLM provider '$PROVIDER' at $BASE: not checked here, the app pings it on startup"
 fi
@@ -50,8 +57,14 @@ if lsof -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   die "Port $PORT is already in use (running instance? stop it or set UI_PORT)"
 fi
 
-uv sync --quiet
-ok "dependencies in sync"
+# Keep the LiveKit worker's packages when LiveKit is configured. A plain `uv sync` UNINSTALLS every
+# optional extra, which silently broke the running worker (ModuleNotFoundError: livekit) after each
+# restart of this script. --inexact: never remove packages another process installed.
+LK_URL="${LIVEKIT_URL:-$(env_get LIVEKIT_URL)}"
+SYNC_ARGS=(--quiet --inexact)
+[ -n "$LK_URL" ] && SYNC_ARGS+=(--extra livekit-voice)
+uv sync "${SYNC_ARGS[@]}"
+ok "dependencies in sync${LK_URL:+ (incl. livekit-voice)}"
 if [ "$WATCH" = "1" ]; then
   ok "auto-reload on (uvicorn --reload); pass --no-watch to disable"
 else

@@ -14,6 +14,7 @@ from startup_voice.features.voice.stt import (
     elevenlabs_configured,
     get_router,
     probe_tts_fast,
+    refresh_elevenlabs_credits,
     transcribe_audio,
 )
 from startup_voice.features.voice.tts import default_voice_settings, synthesize_mp3
@@ -31,6 +32,7 @@ __all__ = [
     "parse_tool_webhook_body",
     "personaplex_system_prompt",
     "probe_tts_fast",
+    "refresh_elevenlabs_credits",
     "synthesize_mp3",
     "transcribe_audio",
 ]

@@ -103,3 +103,12 @@ def test_local_whisper_via_openai_compatible_server(monkeypatch):
     assert name == "local" and stt.capabilities.streaming is False
     monkeypatch.setenv("LIVEKIT_STT", "openai_compatible")  # alias
     assert worker.pick_stt_provider() == "local"
+
+
+def test_provider_errors_read_as_plain_sentences():
+    quota = "ElevenLabs STT error [quota_exceeded]"
+    assert "Kontingent" in worker.describe_voice_error("stt", quota, "de")
+    assert "quota" in worker.describe_voice_error("tts", quota, "en")
+    assert "Schlüssel" in worker.describe_voice_error("tts", "401 Unauthorized", "de")
+    assert "not responding" in worker.describe_voice_error("stt", "connection reset", "en")
+    assert "Spracherkennung" in worker.describe_voice_error("stt", "boom", "de")

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Literal, Protocol
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 SlotId = Literal["team", "product", "traction", "market", "financing"]
 SlotStatus = Literal["open", "partial", "solid"]
@@ -40,9 +40,10 @@ DIMENSIONS_SPEC: dict[SlotId, ObjectSlotSpec] = {
         id="product",
         label="Produkt & Stand",
         description="Problem, solution, development stage, USP.",
-        required_fields=["problem_solution", "stage_status", "usp_tech"],
+        required_fields=["problem", "solution", "stage_status", "usp_tech"],
         field_labels={
-            "problem_solution": "Problem & Lösung",
+            "problem": "Problem",
+            "solution": "Lösung",
             "stage_status": "Entwicklungsstand",
             "usp_tech": "Alleinstellung & Tech",
         },
@@ -171,6 +172,31 @@ class DimensionState(BaseModel):
     # LLM-judged Belege quality 0..1 (concreteness / readability for the analyst). Not keyword hits.
     belege: float = 0.0
     updated_at_turn: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_legacy_fields(cls, data):
+        """Schema v2 split product.problem_solution into problem + solution (ido-core has both).
+
+        Conversations saved before that keep their text: the old combined answer becomes the
+        problem, and the empty solution is simply asked for next. Runs on load, never on write.
+        """
+        if not isinstance(data, dict) or data.get("slot") != "product":
+            return data
+        data = dict(data)
+        fields = dict(data.get("fields") or {})
+        old = fields.pop("problem_solution", None)
+        if old is not None:
+            if not (fields.get("problem") or "").strip():
+                fields["problem"] = old
+            fields.setdefault("solution", "")
+        data["fields"] = fields
+        pending = dict(data.get("pending") or {})
+        if "problem_solution" in pending:
+            moved = pending.pop("problem_solution")
+            pending.setdefault("problem", moved)
+        data["pending"] = pending
+        return data
 
     @classmethod
     def blank(cls, slot: SlotId) -> DimensionState:

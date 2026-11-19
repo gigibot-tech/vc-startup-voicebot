@@ -215,7 +215,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
   }
 
   /**
-   * Voice mode = the two big cards ("Antippen & sprechen" / "Freies Gespräch"). The hidden
+   * Voice mode = the two big cards ("Antippen & sprechen" / "Live-Gespräch"). The hidden
    * #voiceModeSel mirrors them. A mode the server has not configured shows a friendly badge;
    * the technical reason (missing LIVEKIT_* …) goes to the Technik fold, not in the founder's face.
    */

@@ -67,6 +67,7 @@ from startup_voice.features.voice import (
     build_personaplex_functions_config,
     build_personaplex_headers,
     default_provider,
+    refresh_elevenlabs_credits,
     default_voice_settings,
     elevenlabs_configured,
     get_router,
@@ -111,11 +112,15 @@ def build_router(*, registry: SessionRegistry) -> APIRouter:
         ``data_dir`` is included so a restart that points at a different session folder
         is obvious (Gespräche are files on disk — restart does not delete them).
         """
+        refresh_elevenlabs_credits()  # an out-of-credits ElevenLabs is not offered at all
         return {
             "ok": True,
             "sessions": len(registry.store.list_ids()),
             "data_dir": str(registry.store.root.resolve()),
             "tts": "elevenlabs" if elevenlabs_configured() else "missing_key",
+            # which reply model the server runs (Settings hides Ollama on a deployed URL)
+            "llm_provider": (os.getenv("LLM_PROVIDER") or "ollama").strip().lower(),
+            "llm_model": (os.getenv("LLM_MODEL") or "").strip(),
             "stt": default_provider(),
             "stt_providers": available_providers(),
             "voice_settings": default_voice_settings(),
@@ -207,11 +212,11 @@ def build_router(*, registry: SessionRegistry) -> APIRouter:
         if not raw:
             raise HTTPException(400, "empty audio")
         ctype = audio.content_type or "application/octet-stream"
-        want = (provider or default_provider()).strip().lower()
+        want = (provider or "auto").strip().lower()
         if want == "browser":
             raise HTTPException(400, "browser STT is client-side — use Web Speech")
         if want == "auto":
-            want = default_provider()
+            want = stt_router.server_default()
         do_fallback = fallback.strip().lower() not in {"0", "false", "no"}
         try:
             text, used, errors = stt_router.transcribe(

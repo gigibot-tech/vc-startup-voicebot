@@ -76,6 +76,14 @@ def build_router(*, registry: SessionRegistry, pipeline: InterviewPipeline) -> A
         registry.put(session)
         return {"session": session.model_dump(), "reply": greeting}
 
+    @router.post("/{session_id}/carry")
+    def carry_dossier(session_id: str) -> dict:
+        """[Dossier mitnehmen] — new empty chat with a copy of this dossier."""
+        source = registry.get(session_id)
+        session, greeting = pipeline.carry_dossier(source)
+        registry.put(session)
+        return {"session": session.model_dump(), "reply": greeting, "carried_from": session_id}
+
     @router.get("/{session_id}")
     def get_session(session_id: str) -> dict:
         """[open conversation] and [JSON export] - the full session document."""

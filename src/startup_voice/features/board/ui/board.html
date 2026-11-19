@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Idea Board</title>
+  <link rel="stylesheet" href="/static/features/board/public.css" />
+</head>
+<body>
+  <header class="site"><div class="wrap">
+    <a class="brand" href="/board"><span class="brand-name">Idea board</span><span class="by">by <img src="/static/features/board/ido-logo.svg" alt="iDO!" /></span></a>
+    <nav class="site">
+      <a class="btn" id="cta" href="#">Save an idea</a>
+    </nav>
+  </div></header>
+  <main><div class="wrap">
+    <p class="eyebrow">Idea board</p>
+    <h1>Ideas founders chose to share</h1>
+    <p class="lead">Short write-ups from first conversations with a founder. Each one is published and listed by its author, who can withdraw it at any time.</p>
+    <div id="grid" class="grid" aria-live="polite"></div>
+    <p id="empty" class="empty" hidden>Nothing listed yet.</p>
+  </div></main>
+  <footer class="site"><div class="wrap">Content is written by the authors and has not been checked. Open an idea to report it.</div></footer>
+  <script type="module" src="/static/features/board/board-page.js"></script>
+</body>
+</html>

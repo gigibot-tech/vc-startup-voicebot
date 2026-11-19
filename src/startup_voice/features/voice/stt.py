@@ -30,6 +30,42 @@ def mark_elevenlabs_unavailable(reason: str) -> None:
     _ELEVENLABS_UNAVAILABLE_REASON = reason[:200]
 
 
+_CREDITS_PREFIX = "credits used up"
+_credits_checked_at = 0.0
+
+
+def refresh_elevenlabs_credits(max_age: float = 600.0) -> None:
+    """Gate ElevenLabs (STT + TTS) when the account has no credits left, before anyone tries it.
+
+    Best effort and cached: a key without the "user read" permission, or no network, changes
+    nothing. Credits coming back (new month, top-up) lifts the gate again.
+    """
+    global _credits_checked_at
+    import time
+
+    key = os.getenv("ELEVENLABS_API_KEY", "").strip()
+    now = time.monotonic()
+    if not key or now - _credits_checked_at < max_age:
+        return
+    _credits_checked_at = now
+    try:
+        res = httpx.get(
+            "https://api.elevenlabs.io/v1/user/subscription",
+            headers={"xi-api-key": key},
+            timeout=2.5,
+        )
+        if res.status_code != 200:
+            return
+        data = res.json()
+        used, limit = int(data.get("character_count") or 0), int(data.get("character_limit") or 0)
+    except (httpx.HTTPError, ValueError, TypeError):
+        return
+    if limit > 0 and used >= limit:
+        mark_elevenlabs_unavailable(f"{_CREDITS_PREFIX} ({used}/{limit})")
+    elif _ELEVENLABS_UNAVAILABLE_REASON.startswith(_CREDITS_PREFIX):
+        mark_elevenlabs_unavailable("")
+
+
 class SttError(RuntimeError):
     """Raised when transcription / probe fails."""
 
@@ -179,14 +215,20 @@ class SttRouter:
         return names
 
     def default_name(self) -> str:
+        """What the app starts with: the browser's own recognizer.
+
+        A paid cloud provider is never the silent default (it may be out of credits and the
+        founder did not choose it); it is picked in Settings, or with STT_PROVIDER=...
+        """
         pref = (os.getenv("STT_PROVIDER") or "").strip().lower()
-        avail = self.available_names()
-        if pref in avail:
+        return pref if pref in self.available_names() else "browser"
+
+    def server_default(self) -> str:
+        """Which cloud backend answers an upload that names no provider (first one that is configured)."""
+        pref = (os.getenv("STT_PROVIDER") or "").strip().lower()
+        if pref in self.available_names() and pref != "browser":
             return pref
-        for b in self.backends:
-            if b.configured():
-                return b.name
-        return "browser"
+        return next((b.name for b in self.backends if b.configured()), "browser")
 
     def _get(self, name: str) -> SttBackend | None:
         for b in self.backends:
@@ -195,7 +237,7 @@ class SttRouter:
         return None
 
     def _chain(self, preferred: str | None) -> list[SttBackend]:
-        want = (preferred or self.default_name()).strip().lower()
+        want = (preferred or self.server_default()).strip().lower()
         ordered: list[SttBackend] = []
         first = self._get(want)
         if first and first.configured():
@@ -237,7 +279,7 @@ class SttRouter:
         fallback: bool = True,
     ) -> tuple[str, str, list[str]]:
         """Return (text, provider_used, errors_from_failed_attempts)."""
-        want = (provider or self.default_name()).strip().lower()
+        want = (provider or self.server_default()).strip().lower()
         if want == "browser":
             raise SttError("browser STT is client-side only")
         chain = self._chain(want) if fallback else ([self._get(want)] if self._get(want) else [])

@@ -51,7 +51,7 @@ When `llm` is `granite-3b` or `gemma-3n-e2b`, chat uses the same loaded `text-ge
 3. `POST /api/sessions/{id}/turn/reply` saves Call #1 immediately; `POST /api/sessions/{id}/turn/commit` `{raw_reply, raw_extract}` runs the dossier review/score gate
 4. **Speaking during dossier update:** Clicking `Sprechen` while Call #2 (`Updating dossier…`) is still running starts recording immediately without aborting the background extract; if the new utterance is submitted before Call #2 finishes, `sendText()` awaits `inFlightExtractPromise` so the new reply always uses the freshly updated dossier.
 
-Whisper STT uses `onnx-community/whisper-tiny` via the shared worker + reusable `ModelStatusCard` (`static/shared/model-manager.js`, `transformers-worker.js` on `@huggingface/transformers@4`). Local TTS (default) uses `Xenova/mms-tts-deu` / `Xenova/mms-tts-eng` on the same worker. Download progress syncs to `#processBanner`. Whisper is the default STT fallback when no cloud keys are configured. Continue-asking has matching `/continue/prepare` + `/continue/commit`.
+Whisper STT uses `onnx-community/whisper-small` (q8, ~250 MB download once; tiny garbled German) via the shared worker + reusable `ModelStatusCard` (`static/shared/model-manager.js`, `transformers-worker.js` on `@huggingface/transformers@4`). Local TTS (default) uses `Xenova/mms-tts-deu` / `Xenova/mms-tts-eng` on the same worker. Download progress syncs to `#processBanner`. Whisper is the default STT fallback when no cloud keys are configured. Continue-asking has matching `/continue/prepare` + `/continue/commit`.
 
 ### Voice UX
 - Phases: **listening → thinking → speaking → idle** (orb + status). Sending a turn clears listening/speaking immediately so UI does not stick on “Speaking…/Listening…”.
@@ -67,9 +67,10 @@ UI session picker loads `GET /api/sessions` and resumes `session.json` from disk
 - **Nav oben, eine Zeile** — STT-Badge versteckt; **Neues Gespräch** in der Sidebar; Gespräch-Dropdown nur bei eingeklappter Sidebar und wenn die Zeile nicht überläuft (unter 720px immer weg)
 - **Dossier unter dem Chat** (rounded card in Hero mode)
 - Optional: Nav links / Dossier rechts
-- **Gespräch löschen** → `DELETE /api/sessions/{id}` (chat + files)
+- **Gespräch & Dossier löschen** → `DELETE /api/sessions/{id}` (Konversation und Dossier)
 - **Dossier leeren** → clear slots only
 - **Dossier abschließen** → end of dossier panel; warns if incomplete; writes an immutable timestamped snapshot `dossiers/vXX_<UTC>_dossier.{md,json,pdf}` + appends to `session.dossier_versions` (each session can hold multiple finalized versions; stays in the session with per-version MD/PDF/JSON links)
+- **Dossier mitnehmen** → `POST /api/sessions/{id}/carry` starts a new empty chat with a copy of the dossier; the old transcript stays
 - **Home/picker** → only **Neues Gespräch jetzt starten** (no Sprechen on home); mic appears after the session opens
 - **App state SSOT** → `appState.{view,sessionId,session,list}` + URL `?s=<id>`; sidebar/select/dossier/finalize all use `sessionId` (stale responses ignored)
 - **Voice I/O** → `SttRouter` (Strategy + fallback chain), same composition style as `InterviewPipeline(llm=…)` — **not** inside the interview pipeline. `POST /api/voice/preflight` fail-fast DNS/key before mic; Sprechen stops TTS first; cloud STT → browser fallback
@@ -97,7 +98,7 @@ Persistenz: `data/sessions/interview_config.json` (Server-SSOT für Prompt + Kat
 | Field labels | UI + exports use German labels from `DIMENSIONS_SPEC.field_labels` (no snake_case) |
 | Fragenkatalog | Edit slot question blueprints (feeds agent paraphrase) |
 | Dossier leeren | Wipe slot fields, keep chat |
-| Gespräch löschen | Delete whole session from disk |
+| Gespräch & Dossier löschen | Deletes the conversation and the dossier from disk |
 
 ## Conflicts & auto-resolve
 

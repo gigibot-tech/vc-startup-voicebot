@@ -40,7 +40,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from startup_voice.features.board import routes as board_routes
 from startup_voice.features.dossier import routes as dossier_routes
+from startup_voice.features.ido import routes as ido_routes
 from startup_voice.features.interview import routes as interview_routes
 from startup_voice.features.interview.config import InterviewConfigStore
 from startup_voice.features.interview.llm import ConfigurableLLM
@@ -59,7 +61,7 @@ _FEATURES = _PKG / "features"
 _DEFAULT_DATA = _ROOT / "data" / "sessions"
 
 # Features that ship browser code in features/<name>/ui  ->  served at /static/features/<name>/
-_UI_FEATURES = ("dossier", "voice", "sessions", "prefs", "interview")
+_UI_FEATURES = ("dossier", "voice", "sessions", "prefs", "interview", "ido", "board")
 
 
 def _llm() -> ConfigurableLLM:
@@ -96,6 +98,30 @@ def create_app(*, llm: ConfigurableLLM | None = None) -> FastAPI:
 
     # Local UI: never cache HTML/JS/CSS. uvicorn --reload only restarts on *.py;
     # without this, browsers keep serving stale feature UI via 304 Not Modified.
+    # Who may frame the page: only this app itself and the ido-core origins in IDO_ORIGINS. Without
+    # the setting nobody else can embed it (clickjacking guard); with it, ido-core can.
+    # Public pages carry user-written text: never sniffed, no referrer leaked, not framed by strangers,
+    # and not indexed by search engines unless the operator opts in (BOARD_INDEXABLE=1).
+    @app.middleware("http")
+    async def public_page_policy(request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/board" or path.startswith(("/d/", "/api/public/")):
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+            if os.getenv("BOARD_INDEXABLE", "").strip() not in {"1", "true", "yes"}:
+                response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        return response
+
+    @app.middleware("http")
+    async def frame_policy(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/":
+            ancestors = " ".join(["'self'", *ido_routes.allowed_origins()])
+            response.headers["Content-Security-Policy"] = f"frame-ancestors {ancestors}"
+        return response
+
     @app.middleware("http")
     async def no_cache_ui(request: Request, call_next):
         response = await call_next(request)
@@ -107,6 +133,8 @@ def create_app(*, llm: ConfigurableLLM | None = None) -> FastAPI:
         return response
 
     app.include_router(voice_routes.build_router(registry=registry))
+    app.include_router(ido_routes.build_router(registry=registry))
+    app.include_router(board_routes.build_router(registry=registry))
     app.include_router(sessions_routes.build_router(registry=registry, pipeline=pipeline))
     app.include_router(
         interview_routes.build_router(

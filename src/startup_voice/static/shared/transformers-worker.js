@@ -57,10 +57,10 @@ const TTS_MODELS = {
 const SLOTS = {
   whisper: {
     task: "automatic-speech-recognition",
-    modelId: "onnx-community/whisper-tiny",
+    modelId: "onnx-community/whisper-small", // tiny/base mangle German; small is ~250 MB once, cached after
     dtype: "q8",
     device: "wasm",
-    label: "Whisper Tiny · WASM · q8",
+    label: "Whisper Small · WASM · q8",
   },
   llm: { ...LLM_MODELS["granite-3b"] },
   tts: { ...TTS_MODELS.de },

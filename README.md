@@ -103,6 +103,43 @@ words while you talk). Tuning (`LIVEKIT_ENDPOINT_MIN`, `LIVEKIT_TURN_DETECTOR`, 
 Adding a third mode = a driver in `features/voice/ui/`, a transport in
 `features/voice/transports/`, one line each in `static/app.js` and `transports/__init__.py`.
 
+## Public Idea Board
+
+Founders can publish parts of their dossier (button **Öffentlich teilen…** in the dossier panel). Pages
+are public without login: `/board` lists the dossiers whose authors also chose to be listed, `/d/<link>`
+shows one. The look follows the iDO! marketing site.
+
+- **Private by default.** Nothing is public until the founder ticks sections, reads the notes and agrees.
+  Listing on `/board` is a second, separate consent; without it the page is reachable only by its link.
+- **Product, Traction, Market, Financing only.** `team` is rejected by the server, whatever a client sends.
+- **Snapshot.** The text is copied at publish time and editable in the dialog before publishing.
+- **No accounts, so an owner key.** Shown once (`ik_…`), only its SHA-256 hash is stored. It is needed to
+  update or withdraw. Withdrawing deletes the text, title and e-mail; slug and consent record stay.
+- **Optional e-mail** only with its own consent, never published. (No verification mail is sent yet.)
+- **Nothing tracked:** no IP addresses or user agents stored, no cookies, no third-party fonts, author
+  text rendered as plain text only; pages are `noindex` unless `BOARD_INDEXABLE=1`. Reports are stored
+  in `DATA_DIR/public/reports.jsonl`; there is no moderation screen yet.
+- **Before a real public launch:** the consent wording is a DRAFT (`CONSENT_VERSION`), and the app has no
+  per-visitor sessions: every visitor could open every conversation. Publishing on a public server needs
+  session isolation first (see `docs/ido-journey/PUBLIC_SHARING.md`).
+
+Data lives in `DATA_DIR/public/<link>.json`. Code: `src/startup_voice/features/board/`.
+
+## Running inside ido-core
+
+ido-core can embed this app in an iframe (idea page → *Interview* tab, enabled by its
+`VITE_VOICE_INTAKE_URL`). Accepted dossier answers then flow into the idea's venture fields:
+
+1. Set `IDO_ORIGINS=<ido-core origin>` here. Without it nobody else can frame the page.
+2. The page posts changed fields to its parent (`postMessage`, explicit target origin, one trusted
+   origin only); **ido-core writes them with the founder's own session** through
+   `apply_venture_field_change`. This server never holds a Supabase token and never calls ido-core.
+3. Values a founder wrote in ido-core themselves are never overwritten; the interview shows
+   "n Felder nicht übernommen" instead.
+
+Mapping (dossier field → venture field), rules and the validator: `docs/ido-journey/PLAN.md`;
+the machine-readable contract is `src/startup_voice/features/ido/journey_map.json`.
+
 ## How it works (voice ≠ AI)
 
 **Voice never calls the LLM.** Mic / TTS are a separate feature. The shell injects a callback
