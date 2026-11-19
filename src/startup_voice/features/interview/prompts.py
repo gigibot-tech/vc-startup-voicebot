@@ -99,9 +99,11 @@ REPLY_RULES = (
     "answers one of them (even roughly, or with 0 / none / noch nicht), ask BACKUP instead.\n"
     "3) NEVER repeat or paraphrase LAST_QUESTION (unless RE_ASK says so), and never ask "
     "about ALREADY_ANSWERED.\n"
-    "4) Only ASK_1 given (ASK_2: none): say it is the last question before the dossier is "
+    "4) Speak like a person: no lists, no field names, no technical keys, never mention "
+    "other open topics.\n"
+    "5) Only ASK_1 given (ASK_2: none): say it is the last question before the dossier is "
     "complete ('Letzte kurze Frage:' / 'One last question:') and ask just that one.\n"
-    "5) ASK_1: none, or 'Founder just said' answers the last open field: short wrap-up, "
+    "6) ASK_1: none, or 'Founder just said' answers the last open field: short wrap-up, "
     "then [[intake:end]]."
 )
 
@@ -160,7 +162,7 @@ def split_reply_marks(raw: str) -> tuple[str, bool, bool]:
             text = text[: m_dos.start()].strip()
     if not dossier_found:
         needs_extract = True
-    return text, needs_extract, offer_end
+    return strip_field_leaks(text), needs_extract, offer_end
 
 # ---------------------------------------------------------------------------
 # 1) CALL #2: EXTRACT — structured facts out of free speech (must be valid JSON)
@@ -429,8 +431,46 @@ def open_field_keys(session: InterviewSession) -> list[str]:
 
 
 def field_hint(key: str) -> str:
-    """``"slot.field — what to ask"`` line for the reply prompt."""
-    return f"{key} — {FIELD_QUESTION_HINTS.get(key, key.split('.', 1)[-1])}"
+    """Plain-language topic for the reply prompt.
+
+    !! NEVER put internal ``slot.field`` keys (``product.problem`` …) into the REPLY prompt. !!
+    Small models (Granite 4 3B in the browser) read them out loud, e.g. "Wenn du möchtest,
+    gib mir Infos zu: - product.problem - market.market_size …". Every reply-prompt line must
+    go through this function (or ``already_answered_text``); keys are only fine for Python-side
+    bookkeeping (``session.last_asked_fields``). Guarded by
+    ``test_build_reply_prompt_ask_1_not_product_when_product_full`` (keys absent from the prompt)
+    and, as a last line of defense, ``strip_field_leaks`` on the model's output.
+    The Netlify twin is ``fieldHint`` in netlify-app/netlify/functions/api.mjs — keep both in sync.
+    """
+    return FIELD_QUESTION_HINTS.get(key, key.split(".", 1)[-1].replace("_", " "))
+
+
+_FIELD_KEY_RE = re.compile(
+    r"\b(?:team|product|traction|market|financing)\.[a-z]+(?:_[a-z]+)*\b", re.IGNORECASE
+)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+
+
+def strip_field_leaks(text: str) -> str:
+    """Drop sentences / list lines that read internal field keys out loud.
+
+    Safety net on the model OUTPUT (runs inside ``split_reply_marks``, so every path —
+    streaming, browser LLM, retry — gets it). Prompt hygiene is the real fix (see
+    ``field_hint``); this only catches what a small model echoes anyway. Keeps everything
+    else as is; if nothing would be left, returns the original text.
+    Netlify twin: ``stripFieldLeaks`` in api.mjs.
+    """
+    if not text or not _FIELD_KEY_RE.search(text):
+        return text
+    kept: list[str] = []
+    for line in text.splitlines():
+        sentences = [
+            sent for sent in _SENTENCE_SPLIT_RE.split(line) if not _FIELD_KEY_RE.search(sent)
+        ]
+        if sentences:
+            kept.append(" ".join(sentences).strip())
+    cleaned = "\n".join(ln for ln in kept if ln).strip()
+    return cleaned or text
 
 
 def pick_reply_fields(session: InterviewSession) -> tuple[list[str], str | None]:
@@ -458,6 +498,12 @@ def pick_reply_fields(session: InterviewSession) -> tuple[list[str], str | None]
     asks = [first] + ([second] if second else [])
     backup = next((k for k in rest if k not in asks), None)
     return asks, backup
+
+
+def already_answered_text(session: InterviewSession) -> str:
+    """Filled fields as ``topic: value`` pairs (no internal keys), ``none`` when empty."""
+    pairs = [f"{field_hint(key)}: {val}" for key, val in filled_fields_map(session).items()]
+    return "; ".join(pairs) or "none"
 
 
 def last_assistant_message(session: InterviewSession) -> str:
@@ -648,6 +694,7 @@ def build_reply_prompt(
         if re_ask
         else ""
     )
+    # Topics only, never "slot.field" keys — see field_hint().
     ask_1 = field_hint(asks[0]) if asks else "none — every field is filled (wrap up + [[intake:end]])"
     ask_2 = field_hint(asks[1]) if len(asks) > 1 else "none"
 
@@ -659,7 +706,7 @@ def build_reply_prompt(
         f"{re_ask_note}"
         f"OPEN_FIELDS_LEFT: {len(open_keys)}\n"
         f"FOLLOWUP_MODE: {mode} — {mode_hint}\n"
-        f"ALREADY_ANSWERED (never re-ask): {json.dumps(filled_fields_map(session), ensure_ascii=False)}\n"
+        f"ALREADY_ANSWERED (never re-ask): {already_answered_text(session)}\n"
         f"LAST_QUESTION (do NOT repeat or paraphrase):\n{last_q[:500] or 'none'}\n"
         f"Recent transcript:\n{recent_history(session, last=6)}\n"
         f"{unextracted_note}"

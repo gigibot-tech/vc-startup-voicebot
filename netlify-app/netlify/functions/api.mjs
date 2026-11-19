@@ -123,15 +123,100 @@ async function saveConfig(cfg) {
   return normalized;
 }
 function normPath(path) { return decodeURIComponent(path).replace(/\/+$/, "") || "/"; }
+// !! NEVER put internal "slot.field" keys (product.problem …) into the reply prompt. !!
+// Small models (Granite 4 3B in the browser) read them out loud ("- product.problem - market.market_size").
+// Every prompt line goes through fieldHint(); keys stay in Python/JS bookkeeping only
+// (session.last_asked_fields). stripFieldLeaks() below is the last line of defense on the output.
+// Same texts as FIELD_QUESTION_HINTS in src/startup_voice/features/interview/prompts.py — keep in sync.
+const fieldHints = {
+  "team.founders_roles": "who the founders are and their roles",
+  "team.background_expertise": "founder background / domain expertise",
+  "team.commitment_fulltime": "full-time vs part-time commitment (hours/week)",
+  "product.problem": "the core problem the founders solve and for whom it hurts",
+  "product.solution": "how the product solves that problem",
+  "product.stage_status": "current product stage (idea / prototype / MVP / live)",
+  "product.usp_tech": "technical USP / what makes the technology distinct",
+  "traction.customers_pilots": "current users, pilots, or LOIs (0 / none is fine)",
+  "traction.metrics_revenue": "revenue / MRR or usage metrics (0 / pre-revenue is fine)",
+  "traction.growth_signal": "recent growth signal or near-term user target (flat / 0 is fine)",
+  "market.target_icp": "target customer segment (ICP)",
+  "market.market_size": "estimated market size / TAM",
+  "market.competitors_moat": "main competitors and defensibility / moat",
+  "financing.raise_amount_round": "planned round and target raise amount",
+  "financing.use_of_funds": "what the funds will be spent on",
+  "financing.runway_milestones": "expected runway (months) and key milestones for this round",
+};
+const fieldHint = (key) => fieldHints[key] || key.split(".").pop().replaceAll("_", " ");
+const openFieldKeys = (session) => slots.flatMap((slot) => fields[slot]
+  .filter((f) => !String(session.objects?.[slot]?.fields?.[f] || "").trim())
+  .map((f) => `${slot}.${f}`));
+
+/** ASK_1 = first fresh open field, ASK_2 = random fresh field from another slot, BACKUP = one more.
+ * "Fresh" skips the fields the previous reply asked (the founder is answering them right now). */
+function pickReplyFields(session) {
+  const open = openFieldKeys(session), recent = new Set(session.last_asked_fields || []);
+  const fresh = open.filter((k) => !recent.has(k)).length ? open.filter((k) => !recent.has(k)) : open;
+  if (!fresh.length) return { asks: [], backup: null };
+  const first = fresh[0], firstSlot = first.split(".")[0];
+  const rest = fresh.filter((k) => k !== first);
+  const otherSlot = rest.filter((k) => k.split(".")[0] !== firstSlot);
+  const pool = otherSlot.length ? otherSlot : rest;
+  const second = pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+  const asks = second ? [first, second] : [first];
+  return { asks, backup: rest.find((k) => !asks.includes(k)) || null };
+}
+
+const replyRules = `
+
+YOUR TASK THIS TURN (the dossier is 1 turn behind 'Founder just said'):
+1) At most one short clause acknowledging 'Founder just said'.
+2) Ask ASK_1 and ASK_2 as TWO short questions, one each. If 'Founder just said' already answers one of them (even roughly, or with 0 / none / noch nicht), ask BACKUP instead.
+3) NEVER repeat or paraphrase LAST_QUESTION (unless RE_ASK says so), and never ask about ALREADY_ANSWERED.
+4) Speak like a person: no lists, no field names, no technical keys, never mention other open topics.
+5) Only ASK_1 given (ASK_2: none): say it is the last question before the dossier is complete ('Letzte kurze Frage:' / 'One last question:') and ask just that one.
+6) ASK_1: none, or 'Founder just said' answers the last open field: short wrap-up (they can continue or finalize in the UI), then on its own last line [[intake:end]].
+Spoken, at most 2 sentences, no markdown.`;
+
+/** Mutates session.last_asked_fields / last_asked_turn — save the session afterwards. */
 function promptFor(session, text, cfg) {
-  const ev = session.evaluation || evaluate(session);
-  const focus = ev.next_focus_slot || "team";
-  const gaps = ev.missing_fields.length ? ev.missing_fields.map((x) => `- ${x}`).join("\n") : "Keine Pflichtfelder offen.";
-  const transcript = (session.messages || []).slice(-8).map((m) => `${m.role}: ${m.content}`).join("\n");
+  const open = openFieldKeys(session);
+  const reused = (session.last_asked_fields || []).filter((k) => open.includes(k));
+  let asks, backup, reAsk = false;
+  if (session.last_asked_turn === session.turn_index && reused.length) {
+    asks = reused; backup = open.find((k) => !asks.includes(k)) || null; // Retry: same questions
+  } else {
+    reAsk = open.length > 0 && open.every((k) => (session.last_asked_fields || []).includes(k));
+    ({ asks, backup } = pickReplyFields(session));
+    session.last_asked_fields = asks; session.last_asked_turn = session.turn_index;
+  }
+  const msgs = session.messages || [];
+  const lastQuestion = [...msgs].reverse().find((m) => m.role === "assistant" && String(m.content || "").trim())?.content || "none";
+  const answered = slots.flatMap((slot) => fields[slot]
+    .filter((f) => String(session.objects?.[slot]?.fields?.[f] || "").trim())
+    .map((f) => `${fieldHint(`${slot}.${f}`)}: ${String(session.objects[slot].fields[f]).trim().slice(0, 80)}`)).join("; ") || "none";
   const language = session.language === "en" ? "English" : "German";
-  const system = `${cfg.reply_system_prompt}\nReply in ${language}. Current area: ${labels[focus]}. Next suggested question: ${cfg.slot_questions[focus]}. Do not invent facts. Keep the response brief.`;
-  const user = `Founder just said: ${text}\n\nOpen dossier fields:\n${gaps}\n\nRecent conversation:\n${transcript}\n\nAcknowledge their answer and ask one useful follow-up about an open field. If there are no open fields, offer to wrap up.`;
-  return { system, user, focus };
+  const system = `${cfg.reply_system_prompt}\nReply in ${language}. Do not invent facts.${replyRules}`;
+  const user = [
+    `ASK_1: ${asks[0] ? fieldHint(asks[0]) : "none — every field is filled (wrap up + [[intake:end]])"}`,
+    `ASK_2: ${asks[1] ? fieldHint(asks[1]) : "none"}`,
+    `BACKUP (only if Founder just said already answers ASK_1 or ASK_2): ${backup ? fieldHint(backup) : "none"}`,
+    ...(reAsk ? ["RE_ASK: only topics from LAST_QUESTION are still open — if 'Founder just said' does not answer them, ask once more, shorter and from a different angle."] : []),
+    `ALREADY_ANSWERED (never re-ask): ${answered}`,
+    `LAST_QUESTION (do NOT repeat or paraphrase):\n${String(lastQuestion).slice(0, 500)}`,
+    `Recent conversation:\n${msgs.slice(-6).map((m) => `${m.role}: ${m.content}`).join("\n")}`,
+    `Founder just said (NOT in dossier yet — credit this first!): ${String(text || "").slice(0, 1200)}`,
+  ].join("\n");
+  return { system, user, focus: asks[0]?.split(".")[0] || "team" };
+}
+// Safety net on the model OUTPUT (called from stripMarkers, so every reply path gets it): drops sentences
+// that read internal field keys out loud. Prompt hygiene (fieldHint) is the real fix. Twin: strip_field_leaks in prompts.py.
+const fieldKeyRe = /\b(?:team|product|traction|market|financing)\.[a-z]+(?:_[a-z]+)*\b/i;
+function stripFieldLeaks(text) {
+  if (!text || !fieldKeyRe.test(text)) return text;
+  const cleaned = text.split("\n")
+    .map((line) => line.split(/(?<=[.!?…])\s+/).filter((sent) => !fieldKeyRe.test(sent)).join(" ").trim())
+    .filter(Boolean).join("\n").trim();
+  return cleaned || text;
 }
 const extractSystem = `You extract startup facts from a founder conversation. Return only valid JSON with shape {"updates":{"team":{"fields":{},"summary":"","evidence":[]},"product":{},"traction":{},"market":{},"financing":{}},"belege":{"team":0,"product":0,"traction":0,"market":0,"financing":0}}. Use only facts explicitly stated by the founder. Leave unknown fields empty. Each belege score is 0 to 1 and measures concrete evidence.`;
 function extractUser(session, latest) {
@@ -168,7 +253,7 @@ async function* streamCompletion(system, user) {
   }
 }
 function sse(event, data) { return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`; }
-function stripMarkers(value) { return String(value || "").replace(/\s*\[\[\s*(?:dossier\s*:\s*(?:yes|no)|intake\s*:\s*end)\s*\]\]\s*$/i, "").trim(); }
+function stripMarkers(value) { let text = String(value || ""); for (let i = 0; i < 3; i += 1) text = text.replace(/\s*\[\[\s*(?:dossier\s*:\s*(?:yes|no)|intake\s*:\s*end)\s*\]\]\s*$/i, ""); return stripFieldLeaks(text.trim()); }
 function parseJson(raw) { const text = String(raw || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""); try { return JSON.parse(text); } catch { const start = text.indexOf("{"); const end = text.lastIndexOf("}"); return start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : {}; } }
 function mergeExtract(session, result) {
   const updates = result?.updates || result?.slots || {};
@@ -402,8 +487,8 @@ export default async function handler(request) {
     }
     m = path.match(/^\/api\/sessions\/([^/]+)\/turn\/prepare$/);
     if (m && method === "POST") {
-      const s = await loadSession(m[1]), b = await request.json(), cfg = await loadConfig(); s.messages.push({ role: "user", content: String(b.text || ""), ts: new Date().toISOString(), warning: "" }); s.turn_index += 1; evaluate(s); await saveSession(s);
-      const p = promptFor(s, b.text, cfg); return json({ session: s, reply_system: p.system, reply_user: p.user, extract_system: extractSystem, extract_user: extractUser(s, b.text), reply_max_tokens: 500, extract_max_tokens: 1300 });
+      const s = await loadSession(m[1]), b = await request.json(), cfg = await loadConfig(); s.messages.push({ role: "user", content: String(b.text || ""), ts: new Date().toISOString(), warning: "" }); s.turn_index += 1; evaluate(s);
+      const p = promptFor(s, b.text, cfg); await saveSession(s); return json({ session: s, reply_system: p.system, reply_user: p.user, extract_system: extractSystem, extract_user: extractUser(s, b.text), reply_max_tokens: 500, extract_max_tokens: 1300 });
     }
     m = path.match(/^\/api\/sessions\/([^/]+)\/turn\/reply$/);
     if (m && method === "POST") { const s = await loadSession(m[1]), b = await request.json(), reply = stripMarkers(b.raw_reply); s.messages.push({ role: "assistant", content: reply, ts: new Date().toISOString(), warning: "" }); await saveSession(s); return json({ session: s, reply, needs_extract: true, offer_end: s.evaluation?.ready_for_closing || false }); }

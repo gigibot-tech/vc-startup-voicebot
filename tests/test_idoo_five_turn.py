@@ -307,10 +307,11 @@ def test_build_reply_prompt_ask_1_not_product_when_product_full():
         reply_system_prompt=DEFAULT_REPLY_SYSTEM,
         followup_mode="balanced",
     )
-    ask_line = next(ln for ln in user.splitlines() if ln.startswith("ASK_1"))
-    assert ": team" in ask_line, ask_line
+    assert session.last_asked_fields[0] == "team.founders_roles"
+    assert "ASK_1: who the founders are and their roles" in user
     assert "ALREADY_ANSWERED" in user
-    assert "product.problem" in user
+    # Internal keys never reach the model (small models read them out loud).
+    assert "product.problem" not in user and "team.founders_roles" not in user
 
 
 def test_idoo_turn1_fills_product_then_turn2_leaves_product(tmp_path: Path):
@@ -328,9 +329,8 @@ def test_idoo_turn1_fills_product_then_turn2_leaves_product(tmp_path: Path):
     assert llm.reply_users, "reply LLM must run (Thinking…) before extract"
 
     session = pipe.process_turn(session, IDOO_JOURNEY)
-    ask_line = next(ln for ln in llm.reply_users[-1].splitlines() if ln.startswith("ASK_1"))
-    assert ": product" not in ask_line, (
-        f"must not re-ask Produkt once coverage is full, got {ask_line!r}"
+    assert not any(k.startswith("product.") for k in session.last_asked_fields), (
+        f"must not re-ask Produkt once coverage is full, got {session.last_asked_fields!r}"
     )
     reply = session.messages[-1].content.lower()
     assert "bereits live befindlichen produkt das problem" not in reply
@@ -359,9 +359,7 @@ def test_idoo_five_turns_breadth(tmp_path: Path):
 
     # From turn 2 on, product is already full → no ASK may touch it
     for user in llm.reply_users[1:]:
-        for prefix in ("ASK_1", "ASK_2"):
-            line = next((ln for ln in user.splitlines() if ln.startswith(prefix)), "")
-            assert ": product" not in line, line
+        assert "the core problem the founders solve" not in user.split("ALREADY_ANSWERED", 1)[0]
 
 
 def test_market_turn8_next_turn_moves_off_last_asked_fields():
@@ -399,9 +397,9 @@ def test_market_turn8_next_turn_moves_off_last_asked_fields():
         reply_system_prompt=DEFAULT_REPLY_SYSTEM,
         followup_mode="balanced",
     )
-    assert "ASK_1: financing.raise_amount_round" in user_prompt
-    assert "ASK_2: financing.runway_milestones" in user_prompt
-    assert "market." not in user_prompt.split("ALREADY_ANSWERED", 1)[0]
+    assert "ASK_1: planned round and target raise amount" in user_prompt
+    assert "ASK_2: expected runway (months)" in user_prompt
+    assert "market size" not in user_prompt.split("ALREADY_ANSWERED", 1)[0]
     assert "LAST_QUESTION (do NOT repeat or paraphrase):\nWie groß ist der Markt" in user_prompt
     assert "NOT in dossier yet — credit this first!" in user_prompt
     assert "NEVER repeat or paraphrase LAST_QUESTION" in sys_prompt
@@ -411,7 +409,7 @@ def test_market_turn8_next_turn_moves_off_last_asked_fields():
     _sys2, user2 = build_reply_prompt(
         session, utterance, reply_system_prompt=DEFAULT_REPLY_SYSTEM, followup_mode="balanced"
     )
-    assert "ASK_1: financing.raise_amount_round" in user2
+    assert "ASK_1: planned round and target raise amount" in user2
 
     # Also guard the string-evidence bug seen in 13ad8598748c ("S","o","u","r"…)
     merge_slot_update(
@@ -584,8 +582,9 @@ def test_two_open_fields_are_both_asked_then_re_ask_note():
         reply_system_prompt=DEFAULT_REPLY_SYSTEM,
         followup_mode="balanced",
     )
-    assert "ASK_1: traction.growth_signal" in user_prompt
-    assert "ASK_2: financing.runway_milestones" in user_prompt
+    assert session.last_asked_fields == ["traction.growth_signal", "financing.runway_milestones"]
+    assert "ASK_1: recent growth signal" in user_prompt
+    assert "ASK_2: expected runway (months)" in user_prompt
     assert "BACKUP (only if Founder just said already answers ASK_1 or ASK_2): none" in user_prompt
     assert "Ask ASK_1 and ASK_2 as TWO short questions" in sys_prompt
     assert "RE_ASK" not in user_prompt
@@ -610,7 +609,7 @@ def test_ask_2_is_none_when_only_one_field_remains():
         reply_system_prompt=DEFAULT_REPLY_SYSTEM,
         followup_mode="balanced",
     )
-    assert "ASK_1: financing.runway_milestones" in user
+    assert "ASK_1: expected runway (months)" in user
     assert "ASK_2: none" in user
 
 
@@ -671,3 +670,18 @@ def test_single_open_compound_field_backfills_from_summary_or_evidence():
 
 
 
+
+
+def test_strip_field_leaks_drops_sentences_with_internal_keys():
+    """Granite 4 3B once read the open-field list aloud ('- product.problem - …')."""
+    from startup_voice.features.interview.prompts import split_reply_marks, strip_field_leaks
+
+    raw = (
+        "Danke für die Infos zum MVP. Welche Rolle hast du als Gründer? "
+        "Wenn du möchtest, könntest du mir auch Informationen zu den folgenden Feldern geben: "
+        "- product.problem - traction.customers_pilots Diese Felder helfen uns.\n[[dossier:yes]]"
+    )
+    spoken, needs_extract, _ = split_reply_marks(raw)
+    assert spoken == "Danke für die Infos zum MVP. Welche Rolle hast du als Gründer?"
+    assert needs_extract is True
+    assert strip_field_leaks("Wie groß ist euer Markt?") == "Wie groß ist euer Markt?"
