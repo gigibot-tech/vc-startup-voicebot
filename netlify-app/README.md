@@ -1,14 +1,17 @@
 # Netlify app
 
 This is a separate Node.js deployment for Netlify. The original Python application remains in
-`../src/startup_voice`; the build copies its browser UI into this folder's `dist/` output. The
-Netlify server implementation and storage adapter live under `netlify/`.
+`../src/startup_voice`; the build copies its browser UI into this folder's `dist/` output. The API
+is one regular **Netlify Function** (`netlify/functions/api.mjs`, routed from `/api/*` and `/health`),
+so it deploys on every plan. (An earlier version used the "Netlify Server" runtime, which only exists
+on credit-based plans and made the build fail with "Netlify Server is only available on credit-based
+plans".)
 
 ## Netlify setup
 
-In the Netlify site settings, set **Base directory** to `netlify-app`. The included `netlify.toml`
-then selects Node 24, runs `npm run build`, publishes `dist`, and discovers the server at
-`netlify/server/index.mjs`.
+In the Netlify site settings, set **Base directory** to `netlify-app` and branch `main`. Leave
+Build command / Publish directory empty (or `npm run build` / `dist`): the included `netlify.toml`
+selects Node 24, runs `npm run build`, publishes `dist`, and bundles `netlify/functions/`.
 
 Set these environment variables in the Netlify site settings before deploying:
 
@@ -30,7 +33,9 @@ browser speech recognition, and optional ElevenLabs speech input/output. LiveKit
 its current voice mode relies on a separate always-running worker, which this Netlify app does not
 host. The Node server does not probe the LLM at startup; it reports provider configuration errors
 when an interview turn is requested. Netlify AI Gateway supplies model API credentials on supported
-credit-based plans; it requires at least one production deployment before it is activated.
+credit-based plans only; on other plans set `LLM_API_KEY` + `LLM_BASE_URL` + `LLM_MODEL` yourself
+(e.g. Scaleway: `https://api.scaleway.ai/v1`, `mistral-small-3.2-24b-instruct-2506`).
+Function time limits of your plan apply to one interview turn (reply + dossier update).
 
 ## Deploy steps
 
@@ -39,4 +44,4 @@ credit-based plans; it requires at least one production deployment before it is 
 3. For Netlify AI Gateway, enable AI features for the team and choose a supported model via
    `LLM_MODEL`. Alternatively, add your own `LLM_API_KEY` (and, if needed, `LLM_BASE_URL`) as
    runtime environment variables.
-4. Deploy. The Netlify site's server runtime must be enabled for this project.
+4. Deploy. No special server runtime is needed.

@@ -1,0 +1,5 @@
+# The Netlify app lives in netlify-app/ (it has its own netlify.toml with build, publish and functions).
+# Setting the base here makes a deploy of this repo's root work without any UI settings; a build
+# command typed into the Netlify UI is overridden by the files.
+[build]
+  base = "netlify-app"

@@ -1,9 +1,16 @@
+# Netlify site settings: Base directory = netlify-app   (Publish/Functions are relative to it)
 [build]
-command = "npm run build"
-publish = "dist"
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
 
 [build.environment]
-NODE_VERSION = "24"
+  NODE_VERSION = "24"
+
+[functions]
+  node_bundler = "esbuild"
 
 [dev]
-command = "npm run build"
+  framework = "#static"
+  publish = "dist"
+  functions = "netlify/functions"

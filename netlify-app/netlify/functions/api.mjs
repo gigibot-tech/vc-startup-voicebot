@@ -40,9 +40,16 @@ const defaults = {
 };
 const here = dirname(fileURLToPath(import.meta.url));
 const localRoot = resolve(here, "../../.local-data");
-const isNetlify = process.env.NETLIFY === "true";
-const sessionBlobs = isNetlify ? getStore({ name: "startup-voice-sessions", region: "eu-central-1" }) : null;
-const configBlobs = isNetlify ? getStore({ name: "startup-voice-config", region: "eu-central-1" }) : null;
+// Deployed function (also `netlify dev` is local files): Netlify sets these at runtime, not NETLIFY_DEV.
+const isNetlify = !process.env.NETLIFY_DEV
+  && (process.env.NETLIFY === "true" || Boolean(process.env.NETLIFY_BLOBS_CONTEXT) || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME));
+// Stores are opened on first use, inside a request (the Blobs context only exists then).
+const lazyStore = (name) => {
+  let store;
+  return new Proxy({}, { get: (_, method) => (...args) => (store ||= getStore({ name, region: "eu-central-1" }))[method](...args) });
+};
+const sessionBlobs = isNetlify ? lazyStore("startup-voice-sessions") : null;
+const configBlobs = isNetlify ? lazyStore("startup-voice-config") : null;
 
 function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -368,3 +375,7 @@ export default async function handler(request) {
     return error(e.message || "Internal server error", e.status || 500);
   }
 }
+
+// A regular Netlify Function (works on every plan; no "Netlify Server" needed).
+// Static files come from dist/; only the API and the health check are routed here.
+export const config = { path: ["/api/*", "/health"] };
