@@ -14,7 +14,9 @@ from startup_voice.features.dossier.scoring import evaluate_session, refresh_eva
 from startup_voice.features.interview.pipeline import InterviewPipeline
 from startup_voice.features.interview.prompts import (
     DEFAULT_REPLY_SYSTEM,
+    build_gap_queue,
     build_reply_prompt,
+    pick_also_ask,
     pick_ask_focus,
 )
 from startup_voice.features.sessions.store import FileSessionStore
@@ -591,6 +593,8 @@ def test_focus_slots_tuple_surfaces_both_detail_and_next_rotation_for_llm():
     )
     assert "FOCUS_SLOTS (balanced/depth): ['traction', 'financing']" in user_prompt
     assert "ASK_NOW: traction" in user_prompt
+    assert "ALSO_ASK (same reply, one other open field): financing.runway_milestones" in user_prompt
+    assert "ask TWO short questions" in _sys
     assert "missing=['growth_signal']" in user_prompt
     assert "NEXT_SLOT if Founder just answered ASK_NOW: financing" in user_prompt
     assert "missing=['runway_milestones']" in user_prompt
@@ -599,6 +603,37 @@ def test_focus_slots_tuple_surfaces_both_detail_and_next_rotation_for_llm():
     session.objects["traction"].fields["growth_signal"] = "flat"
     refresh_evaluation(session)
     assert session.evaluation.next_focus_slots == ["financing"]
+
+
+def test_also_ask_is_absent_when_only_one_field_remains():
+    session = InterviewSession.create(language="de")
+    for slot in DIMENSIONS_SPEC:
+        for field in DIMENSIONS_SPEC[slot].required_fields:
+            session.objects[slot].fields[field] = "filled"
+    session.objects["financing"].fields["runway_milestones"] = ""
+    refresh_evaluation(session)
+    _sys, user = build_reply_prompt(
+        session,
+        "200k preseed",
+        "financing",
+        reply_system_prompt=DEFAULT_REPLY_SYSTEM,
+        followup_mode="balanced",
+        slot_question="",
+    )
+    assert "ALSO_ASK: none" in user
+
+
+def test_also_ask_varies_and_skips_the_ask_now_field():
+    session = InterviewSession.create(language="de")
+    refresh_evaluation(session)
+    queue = build_gap_queue(session, primary="team")
+    seen: set[str] = set()
+    for _ in range(40):
+        picked = pick_also_ask(session, "team", ["founders_roles", "background_expertise"], queue)
+        assert picked is not None
+        assert not (picked["slot"] == "team" and picked["field"] == "founders_roles")
+        seen.add(f"{picked['slot']}.{picked['field']}")
+    assert len(seen) >= 2
 
 
 def test_single_open_compound_field_backfills_from_summary_or_evidence():

@@ -52,6 +52,7 @@ CAUTION: test stubs dispatch on substrings "extract", "json only", "summarize" i
 from __future__ import annotations
 
 import json
+import random
 import re
 from typing import Any
 
@@ -103,9 +104,11 @@ REPLY_NO_REASK = (
     "reasonable answer).\n"
     "  2) You decide whether to probe a still-unanswered detail in ASK_NOW (focus_slots[0]) "
     "OR rotate to NEXT_SLOT (focus_slots[1]):\n"
+    "     • If ALSO_ASK is set and 'Founder just said' did not already cover ASK_NOW: ask TWO "
+    "short questions in the same reply — one still-open ASK_NOW field AND the ALSO_ASK field. "
+    "Do not ask only ASK_NOW.\n"
     "     • If ASK_NOW still has an unasked missing_field that 'Founder just said' did not "
-    "address yet: ask a short, specific question on THAT missing field (you may also bridge "
-    "into NEXT_SLOT).\n"
+    "address yet and ALSO_ASK is none: ask a short, specific question on THAT missing field.\n"
     "     • If 'Founder just said' already answered (even roughly, qualitatively, or with "
     "0/none/flat) the question you just asked on ASK_NOW: do NOT repeat or re-drill that "
     "question — jump to NEXT_SLOT in GAP_QUEUE!\n"
@@ -655,6 +658,41 @@ def build_score_belege_user(session: InterviewSession, slots: list[SlotId]) -> s
     return json.dumps(payload, ensure_ascii=False)
 
 
+def pick_also_ask(
+    session: InterviewSession,
+    ask: SlotId,
+    missing_in_ask: list[str],
+    gap_queue: list[dict[str, Any]],
+) -> dict[str, str] | None:
+    """One other open field for this reply, chosen at random.
+
+    Never the field ASK_NOW is already asking. Any other empty field, including
+    another field in the same slot, is eligible. None when nothing else is open.
+    """
+    del session  # queue already carries the open fields
+    if not missing_in_ask:
+        return None
+    primary = missing_in_ask[0]
+    candidates: list[dict[str, str]] = []
+    for entry in gap_queue:
+        slot = str(entry.get("slot") or "")
+        fields = list(entry.get("missing_fields") or [])
+        details = list(entry.get("missing_details") or [])
+        for index, field in enumerate(fields):
+            if slot == ask and field == primary:
+                continue
+            candidates.append(
+                {
+                    "slot": slot,
+                    "field": str(field),
+                    "detail": str(details[index] if index < len(details) else field),
+                }
+            )
+    if not candidates:
+        return None
+    return random.choice(candidates)
+
+
 def build_reply_prompt(
     session: InterviewSession,
     user_text: str,
@@ -718,6 +756,12 @@ def build_reply_prompt(
         if next_entry
         else "none (only 1 slot left in FOCUS_SLOTS; if Founder just covered it, wrap up + [[intake:end]])"
     )
+    also = pick_also_ask(session, ask, missing_in_ask, gap_queue)
+    also_line = (
+        f"ALSO_ASK (same reply, one other open field): {also['slot']}.{also['field']} — {also['detail']}\n"
+        if also
+        else "ALSO_ASK: none (no second open field)\n"
+    )
 
     pending_turns = unextracted_user_turns(session, user_text)
     combined_user = "\n".join(pending_turns)
@@ -733,6 +777,7 @@ def build_reply_prompt(
         f"ASK_NOW: {ask} ({spec.label}, coverage={float(cov.get(ask) or 0):.2f}) — "
         f"missing={missing_in_ask or 'none'} ({missing_details_ask}) — blueprint: {slot_ask}\n"
         f"NEXT_SLOT if Founder just answered ASK_NOW: {next_slot_hint}\n"
+        f"{also_line}"
         f"GAP_QUEUE (ordered): {json.dumps(gap_queue, ensure_ascii=False)}\n"
         f"already_answered (FORBIDDEN to re-ask): {json.dumps(filled_fields_map(session), ensure_ascii=False)}\n"
         f"Recent transcript:\n{recent_history(session, last=6)}\n"
