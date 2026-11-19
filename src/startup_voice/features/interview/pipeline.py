@@ -67,6 +67,9 @@ from startup_voice.features.interview.prompts import (
     build_extract_user,
     build_reply_prompt,
     build_score_belege_user,
+    field_hint,
+    is_repeat,
+    previous_assistant_message,
     recent_history,
     split_reply_marks,
 )
@@ -293,7 +296,8 @@ class InterviewPipeline:
         )
         user = (
             f"Target slot to probe deeper: {target}\n"
-            f"Missing fields overall: {ev.missing_fields or 'none (all filled — probe depth/numbers)'}\n"
+            # Topics, never "slot.field" keys (small models read keys aloud) — see field_hint().
+            f"Missing topics overall: {'; '.join(field_hint(k) for k in (ev.missing_fields or [])) or 'none (all filled — probe depth/numbers)'}\n"
             f"Dossier so far: {json.dumps(dossier_dump, ensure_ascii=False)}\n"
             f"Recent transcript:\n{recent_history(session, last=6)}\n"
             f"Do NOT repeat: {prev_q[:240]}"
@@ -325,6 +329,11 @@ class InterviewPipeline:
         question, _, _ = split_reply_marks(raw_reply)
         if not question:
             raise RuntimeError("LLM returned empty follow-up question")
+        question = self._guard_repeat(
+            session,
+            question,
+            previous=next((m.content for m in reversed(session.messages) if m.role == "assistant"), ""),
+        )
         session.messages.append(
             TurnMessage(role="assistant", content=question, warning=self._last_llm_warning())
         )
@@ -388,6 +397,7 @@ class InterviewPipeline:
             and session.messages[-1].content == reply
         ):
             return session, reply, offer_end
+        reply = self._guard_repeat(session, reply, previous=previous_assistant_message(session))
         session.messages.append(TurnMessage(role="assistant", content=reply))
         self._store.save(session)
         return session, reply, offer_end
@@ -427,6 +437,7 @@ class InterviewPipeline:
         reply, _mark_extract, offer_end = split_reply_marks(raw_reply)
         if not reply:
             raise RuntimeError("LLM returned empty reply")
+        reply = self._guard_repeat(session, reply, previous=previous_assistant_message(session))
         if session.evaluation and session.evaluation.ready_for_closing:
             offer_end = True
         session.messages.append(
@@ -475,6 +486,7 @@ class InterviewPipeline:
         reply, _mark_extract, offer_end = split_reply_marks(raw_reply)
         if not reply:
             raise RuntimeError("LLM returned empty reply")
+        reply = self._guard_repeat(session, reply, previous=previous_assistant_message(session))
         if session.evaluation and session.evaluation.ready_for_closing:
             offer_end = True
         session.messages.append(
@@ -579,6 +591,21 @@ class InterviewPipeline:
             session, updates, belege, turn=session.turn_index, source="chat"
         )
         return touched, refresh_evaluation(session)
+
+    def _guard_repeat(self, session: InterviewSession, reply: str, *, previous: str) -> str:
+        """Never say the previous assistant message again.
+
+        Small models (Granite 4 3B) copy earlier assistant text from the prompt — once the
+        same reply came back word for word although the founder said something new. When
+        ``reply`` is ≥80 % the same as ``previous``, swap in the catalog question for the
+        slot this turn was meant to ask (``last_asked_fields[0]``).
+        """
+        if not is_repeat(reply, previous):
+            return reply
+        asked = session.last_asked_fields or []
+        slot = asked[0].split(".", 1)[0] if asked else (session.evaluation.next_focus_slot or "team")
+        fallback = self.config().question_for(slot)  # type: ignore[arg-type]
+        return fallback if not is_repeat(fallback, previous) else reply
 
     def _session_followup_mode(self, session: InterviewSession) -> str:
         """Prefer per-session setting; fall back to global config / default."""

@@ -257,6 +257,9 @@ class InterviewSession(BaseModel):
     # "slot.field" keys the previous reply asked (skipped next turn so it never repeats).
     last_asked_fields: list[str] = Field(default_factory=list)
     last_asked_turn: int = -1  # turn_index those fields were picked for (Retry reuses them)
+    # Fields the reply BEFORE that asked (= what the founder is answering now); shown to the
+    # model as topics, never as the old message text (small models copy it verbatim).
+    prior_asked_fields: list[str] = Field(default_factory=list)
     objects: dict[SlotId, DimensionState] = Field(default_factory=dict)
     messages: list[TurnMessage] = Field(default_factory=list)
     turn_index: int = 0

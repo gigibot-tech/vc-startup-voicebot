@@ -400,9 +400,11 @@ def test_market_turn8_next_turn_moves_off_last_asked_fields():
     assert "ASK_1: planned round and target raise amount" in user_prompt
     assert "ASK_2: expected runway (months)" in user_prompt
     assert "market size" not in user_prompt.split("ALREADY_ANSWERED", 1)[0]
-    assert "LAST_QUESTION (do NOT repeat or paraphrase):\nWie groß ist der Markt" in user_prompt
+    # Topics of the previous reply — never its text (Granite copied that verbatim).
+    assert "ASKED_LAST_TURN (founder is answering this now — do not ask it again): estimated market size" in user_prompt
+    assert "Wie groß ist der Markt" not in user_prompt
     assert "NOT in dossier yet — credit this first!" in user_prompt
-    assert "NEVER repeat or paraphrase LAST_QUESTION" in sys_prompt
+    assert "Do not ask again about ASKED_LAST_TURN" in sys_prompt
     assert session.last_asked_fields == ["financing.raise_amount_round", "financing.runway_milestones"]
 
     # Retry of the same turn keeps the same picks.
@@ -683,5 +685,43 @@ def test_strip_field_leaks_drops_sentences_with_internal_keys():
     )
     spoken, needs_extract, _ = split_reply_marks(raw)
     assert spoken == "Danke für die Infos zum MVP. Welche Rolle hast du als Gründer?"
+    # Real Granite output: list on its own lines, intro + outro around it must go too.
+    granite = (
+        "Um die Teamstruktur zu verstehen: welche Rolle hast du als Gründer? "
+        "Wenn du möchtest, könntest du mir auch Informationen zu den folgenden Feldern geben:\n"
+        "- product.problem\n- market.market_size\n"
+        "Diese Felder werden uns helfen, ein umfassenderes Bild zu erhalten."
+    )
+    assert strip_field_leaks(granite) == (
+        "Um die Teamstruktur zu verstehen: welche Rolle hast du als Gründer?"
+    )
     assert needs_extract is True
     assert strip_field_leaks("Wie groß ist euer Markt?") == "Wie groß ist euer Markt?"
+
+
+def test_repeat_guard_swaps_in_catalog_question(tmp_path: Path):
+    """Granite 4 3B once returned the previous reply word for word to a new founder line."""
+
+    class EchoLLM:
+        def __init__(self) -> None:
+            self.text = ""
+
+        def complete(self, system, user, *, max_tokens=None, json_mode=False):
+            if "extract" in system.lower() or json_mode:
+                return '{"updates":{},"belege":{}}'
+            return self.text + "\n[[dossier:no]]"
+
+    llm = EchoLLM()
+    pipe = InterviewPipeline(llm, FileSessionStore(tmp_path))
+    session, _ = pipe.start_session(language="de")
+    llm.text = "Welche Rolle hast du als Gründer und was bringst du mit?"
+    session = pipe.process_turn(session, "Wir haben ein MVP live.")
+    first = session.messages[-1].content
+    assert first == llm.text
+
+    # Same text again for a different founder line → replaced by a catalog question.
+    session = pipe.process_turn(session, "Ach, keine Ahnung.")
+    second = session.messages[-1].content
+    assert second != first
+    slot = session.last_asked_fields[0].split(".")[0]
+    assert second == pipe.config().question_for(slot)

@@ -18,8 +18,7 @@ calls in strict sequence (never in parallel, so TTS starts immediately):
   │ • User     : ASK_1 + ASK_2 + BACKUP  (picked in Python, skipping the    │
   │                                     fields asked last turn)             │
   │              ALREADY_ANSWERED  flat map of filled slot.field values     │
-  │              LAST_QUESTION     previous assistant msg (never repeat)    │
-  │              Recent transcript last 6 messages                          │
+  │              ASKED_LAST_TURN   topics of the previous reply (no text!)  │
   │              Founder just said (all unextracted user turns)             │
   │ • Output   : TWO short questions (ASK_1 + ASK_2)                        │
   │              (+ optional trailing [[intake:end]])                       │
@@ -50,6 +49,7 @@ CAUTION: test stubs dispatch on substrings "extract", "json only", "summarize" i
 
 from __future__ import annotations
 
+import difflib
 import json
 import random
 import re
@@ -94,13 +94,12 @@ REPLY_END_GATE = (
 # NOTE: avoid the substring "extract" here — test stubs dispatch on '"extract" in system.lower()'.
 REPLY_RULES = (
     "\n\nYOUR TASK THIS TURN (the dossier is 1 turn behind 'Founder just said'):\n"
-    "1) At most one short clause acknowledging 'Founder just said'.\n"
+    "1) At most one short clause reacting to 'Founder just said'.\n"
     "2) Ask ASK_1 and ASK_2 as TWO short questions, one each. If 'Founder just said' already "
     "answers one of them (even roughly, or with 0 / none / noch nicht), ask BACKUP instead.\n"
-    "3) NEVER repeat or paraphrase LAST_QUESTION (unless RE_ASK says so), and never ask "
-    "about ALREADY_ANSWERED.\n"
-    "4) Speak like a person: no lists, no field names, no technical keys, never mention "
-    "other open topics.\n"
+    "3) Do not ask again about ASKED_LAST_TURN (unless RE_ASK says so) or ALREADY_ANSWERED.\n"
+    "4) Write a NEW reply in your own words. Speak like a person: no lists, no field names, "
+    "no technical keys, never mention other open topics.\n"
     "5) Only ASK_1 given (ASK_2: none): say it is the last question before the dossier is "
     "complete ('Letzte kurze Frage:' / 'One last question:') and ask just that one.\n"
     "6) ASK_1: none, or 'Founder just said' answers the last open field: short wrap-up, "
@@ -448,29 +447,56 @@ def field_hint(key: str) -> str:
 _FIELD_KEY_RE = re.compile(
     r"\b(?:team|product|traction|market|financing)\.[a-z]+(?:_[a-z]+)*\b", re.IGNORECASE
 )
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…:])\s+")
 
 
 def strip_field_leaks(text: str) -> str:
-    """Drop sentences / list lines that read internal field keys out loud.
+    """Cut the reply at the first sentence that reads internal field keys out loud.
 
     Safety net on the model OUTPUT (runs inside ``split_reply_marks``, so every path —
     streaming, browser LLM, retry — gets it). Prompt hygiene is the real fix (see
-    ``field_hint``); this only catches what a small model echoes anyway. Keeps everything
-    else as is; if nothing would be left, returns the original text.
-    Netlify twin: ``stripFieldLeaks`` in api.mjs.
+    ``field_hint``); this only catches what a small model echoes anyway.
+
+    Everything from the first leaking sentence on is dropped — also a list intro just
+    before it ("…zu den folgenden Feldern geben:") — because what follows a dumped list is
+    filler about that list ("Diese Felder helfen uns…"). Dropping only the keys left
+    "…geben: Diese Felder…" behind (seen with Granite 4 3B). Returns the original text if
+    nothing would be left. Netlify twin: ``stripFieldLeaks`` in api.mjs.
     """
     if not text or not _FIELD_KEY_RE.search(text):
         return text
+    sentences = _SENTENCE_SPLIT_RE.split(" ".join(text.split()))
     kept: list[str] = []
-    for line in text.splitlines():
-        sentences = [
-            sent for sent in _SENTENCE_SPLIT_RE.split(line) if not _FIELD_KEY_RE.search(sent)
-        ]
-        if sentences:
-            kept.append(" ".join(sentences).strip())
-    cleaned = "\n".join(ln for ln in kept if ln).strip()
-    return cleaned or text
+    for sent in sentences:
+        if _FIELD_KEY_RE.search(sent) or sent.lstrip().startswith(("-", "*", "•")):
+            break
+        kept.append(sent)
+    while kept and kept[-1].rstrip().endswith(":"):
+        kept.pop()  # list intro whose list we just cut
+    return " ".join(kept).strip() or text
+
+
+def is_repeat(reply: str, previous: str, *, threshold: float = 0.8) -> bool:
+    """True when ``reply`` is (almost) the previous assistant message again.
+
+    Small models copy earlier assistant text from the prompt; the pipeline then swaps in
+    a catalog question instead of saying the same thing twice.
+    """
+    a, b = " ".join((reply or "").lower().split()), " ".join((previous or "").lower().split())
+    if not a or not b:
+        return False
+    return a == b or difflib.SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+def previous_assistant_message(session: InterviewSession) -> str:
+    """Assistant line before the latest founder message (what the founder answered)."""
+    seen_user = False
+    for m in reversed(session.messages):
+        if m.role == "user":
+            seen_user = True
+        elif m.role == "assistant" and seen_user and (m.content or "").strip():
+            return m.content.strip()
+    return ""
 
 
 def pick_reply_fields(session: InterviewSession) -> tuple[list[str], str | None]:
@@ -504,14 +530,6 @@ def already_answered_text(session: InterviewSession) -> str:
     """Filled fields as ``topic: value`` pairs (no internal keys), ``none`` when empty."""
     pairs = [f"{field_hint(key)}: {val}" for key, val in filled_fields_map(session).items()]
     return "; ".join(pairs) or "none"
-
-
-def last_assistant_message(session: InterviewSession) -> str:
-    """Most recent assistant line (the question the founder is answering now)."""
-    for m in reversed(session.messages):
-        if m.role == "assistant" and (m.content or "").strip():
-            return m.content.strip()
-    return ""
 
 
 def unextracted_user_turns(session: InterviewSession, user_text: str) -> list[str]:
@@ -662,7 +680,9 @@ def build_reply_prompt(
 
     Python picks ASK_1 / ASK_2 / BACKUP (``pick_reply_fields``) and records them in
     ``session.last_asked_fields`` so the next turn moves on. The LLM only phrases the
-    questions, sees its own LAST_QUESTION and is told never to repeat it.
+    questions. It sees what it asked last turn as TOPICS (``ASKED_LAST_TURN``), never as the
+    old message text, and no transcript with assistant lines: a 3B model copies such text.
+    ``is_repeat`` in the pipeline catches a copy anyway.
     """
     open_keys = open_field_keys(session)
     reused = [k for k in session.last_asked_fields if k in open_keys]
@@ -674,12 +694,13 @@ def build_reply_prompt(
     else:
         re_ask = bool(open_keys) and set(open_keys) <= set(session.last_asked_fields or [])
         asks, backup = pick_reply_fields(session)
+        session.prior_asked_fields = list(session.last_asked_fields or [])
         session.last_asked_fields = list(asks)
         session.last_asked_turn = session.turn_index
 
     pending_turns = unextracted_user_turns(session, user_text)
     combined_user = "\n".join(pending_turns)
-    last_q = last_assistant_message(session)
+    asked_last_turn = "; ".join(field_hint(k) for k in session.prior_asked_fields) or "none"
     mode = (followup_mode or "balanced").strip().lower()
     mode_hint = FOLLOWUP_MODE_HINTS.get(mode, FOLLOWUP_MODE_HINTS["balanced"])
     unextracted_note = (
@@ -689,7 +710,7 @@ def build_reply_prompt(
         else ""
     )
     re_ask_note = (
-        "RE_ASK: only fields from LAST_QUESTION are still open — if 'Founder just said' does "
+        "RE_ASK: only the ASKED_LAST_TURN topics are still open — if 'Founder just said' does "
         "not answer them, ask once more, shorter and from a different angle.\n"
         if re_ask
         else ""
@@ -707,8 +728,9 @@ def build_reply_prompt(
         f"OPEN_FIELDS_LEFT: {len(open_keys)}\n"
         f"FOLLOWUP_MODE: {mode} — {mode_hint}\n"
         f"ALREADY_ANSWERED (never re-ask): {already_answered_text(session)}\n"
-        f"LAST_QUESTION (do NOT repeat or paraphrase):\n{last_q[:500] or 'none'}\n"
-        f"Recent transcript:\n{recent_history(session, last=6)}\n"
+        # !! Topics only — NEVER the previous assistant text or a transcript with assistant lines:
+        # Granite 4 3B copied that text verbatim as its next reply (with the old field list).
+        f"ASKED_LAST_TURN (founder is answering this now — do not ask it again): {asked_last_turn}\n"
         f"{unextracted_note}"
         f"Founder just said (NOT in dossier yet — credit this first!): {combined_user[:1200]}"
     )
