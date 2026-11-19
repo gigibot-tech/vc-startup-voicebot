@@ -33,6 +33,14 @@ const STATE_LABEL = {
   error: "Error",
 };
 
+const isEn = () => String(document.documentElement?.lang || "de").startsWith("en");
+const DE_STATE = {
+  unloaded: "Nicht geladen", checking_cache: "Prüfe Speicher …", cached_idle: "Gespeichert",
+  downloading: "Lädt", warming_up: "Wird vorbereitet …", ready: "Bereit", running: "Arbeitet …", error: "Fehler",
+};
+const DE_ACT = { download: "Modell laden", cancel: "Abbrechen", load: "In GPU laden", unload: "Aus Speicher entfernen", retry: "Erneut versuchen" };
+const EN_ACT = { download: "Download model", cancel: "Cancel", load: "Load into GPU", unload: "Unload RAM", retry: "Retry" };
+
 function fmtBytes(n) {
   const v = Number(n) || 0;
   if (v < 1024) return `${v} B`;
@@ -88,6 +96,7 @@ function createModelManager() {
         if (msg.state === "downloading" || msg.state === "warming_up" || msg.state === "checking_cache") {
           onProcessBanner?.({
             slot: msg.slot,
+            state: msg.state,
             message: msg.state === "warming_up"
               ? `${cur.label}: warming up…`
               : msg.state === "checking_cache"
@@ -367,8 +376,10 @@ function createModelManager() {
         badgeEl.textContent = info?.label || SLOT_META[slotKey].badge;
       }
       const st = info?.state || "unloaded";
-      let label = STATE_LABEL[st] || st;
-      if (st === "downloading") label = `Downloading ${info.progress || 0}%`;
+      let label = (isEn() ? STATE_LABEL : DE_STATE)[st] || st;
+      if (st === "downloading") label = `${isEn() ? "Downloading" : "Lädt"} ${info.progress || 0}%`;
+      const act = isEn() ? EN_ACT : DE_ACT;
+      for (const [k, el] of Object.entries(btns)) el.textContent = act[k];
       pill.textContent = label;
       pill.dataset.state = st;
       const showProg = st === "downloading" || st === "warming_up";

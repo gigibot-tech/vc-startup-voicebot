@@ -371,6 +371,10 @@ button, select, input { font: inherit; color: inherit; }
 .icon-toggle > span { display: inline-flex; }
 .icon-toggle > span[hidden] { display: none !important; }
 .prefs-hint { margin: 0 0 0.65rem; font-size: 0.75rem; opacity: 0.65; line-height: 1.4; }
+/* live status of a setting (what is active / still loading) */
+.prefs-hint--status {
+  opacity: 0.9; padding-left: 0.6rem; border-left: 3px solid var(--vi-mint);
+}
 .prefs-prompt textarea, .catalog-panel textarea {
   width: 100%; resize: vertical; min-height: 2.5rem;
   border: 1px solid var(--vi-border); border-radius: 0.65rem;

@@ -16,6 +16,7 @@ import { api } from "../../shared/api.js";
 import { clamp01, clampSpeed, fmt01 } from "../../shared/format.js";
 import { modelManager } from "../../shared/model-manager.js";
 import { applyChromeI18n } from "./chrome-i18n.js";
+import { describeLlm, describeStt } from "./tech-status.js";
 import { isBrowserLlm, prefs, savePrefs } from "./prefs.js";
 
 /** @param {{voice: object, onMetaChange: () => void, onLanguageChange?: (lang: string) => void | Promise<void>}} deps */
@@ -102,6 +103,23 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
       });
   }
 
+  /** Plain-language status under the STT / LLM dropdowns (what is active, what is still loading). */
+  function syncTechStatus() {
+    const lang = prefs.lang || "de";
+    const llmEl = $("llmStatus");
+    if (llmEl) {
+      const st = modelManager.getState("llm");
+      llmEl.textContent = describeLlm({ llm: prefs.llm, state: st.state, progress: st.progress, lang });
+    }
+    const sttEl = $("sttStatus");
+    if (sttEl) {
+      const st = modelManager.getState("whisper");
+      const stt = !prefs.stt || prefs.stt === "auto" ? "browser" : prefs.stt;
+      sttEl.textContent = describeStt({ stt, state: st.state, progress: st.progress, lang });
+    }
+  }
+  modelManager.subscribe((slot) => { if (slot === "llm" || slot === "whisper") syncTechStatus(); });
+
   function syncModelCards() {
     const whisperSlot = $("whisperModelSlot");
     const llmSlot = $("llmModelSlot");
@@ -150,6 +168,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
   }
 
   function paint() {
+    syncTechStatus();
     $("langSel").value = prefs.lang;
     $("voiceOn").checked = prefs.voice;
     if ($("cuesOn")) $("cuesOn").checked = prefs.cues !== false;
@@ -298,6 +317,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     bindPref("sttSel", "change", (e) => e.value, "stt", () => {
       voice.applySttProvider();
       syncModelCards();
+      syncTechStatus();
       onMetaChange?.();
     });
     bindPref("ttsSel", "change", (e) => e.value, "tts", () => {
@@ -307,6 +327,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     });
     bindPref("llmSel", "change", (e) => e.value, "llm", () => {
       syncModelCards();
+      syncTechStatus();
       onMetaChange?.();
     });
     bindPref("voiceOn", "change", (e) => e.checked, "voice", () => {

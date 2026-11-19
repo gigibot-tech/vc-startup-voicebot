@@ -137,40 +137,43 @@
         <summary><span data-i18n="techTitle">Technik &amp; Feintuning</span><small data-i18n="techSub">Für dein Tech-Team – musst du nicht anfassen</small></summary>
         <div class="prefs-tech__grid">
           <div class="prefs-group" aria-label="Voice mode">
-            <span class="prefs-group-label">Voice mode</span>
-            <p class="prefs-hint" id="voiceModeHint">Classic = push-to-talk in the browser. LiveKit = hands-free WebRTC call with the voice worker (README). With STT = Whisper (Browser) the browser listens in a call and the worker only speaks.</p>
+            <span class="prefs-group-label" data-i18n="voiceModeLabel">Sprachmodus</span>
+            <p class="prefs-hint" id="voiceModeHint" data-i18n="voiceModeHelp">Klassisch: Du tippst auf den Mikrofon-Knopf, sprichst und sendest.</p>
             <p class="prefs-hint prefs-hint--warn" id="voiceModeTech" hidden></p>
           </div>
           <div class="prefs-group" aria-label="Speech recognition">
-            <span class="prefs-group-label">Speech recognition</span>
+            <span class="prefs-group-label" data-i18n="sttLabel">Spracherkennung (STT)</span>
+            <p class="prefs-hint" data-i18n="sttHelp">Standard: Der Browser erkennt deine Sprache selbst.</p>
             <label class="setting setting-row"><span>STT</span>
               <select id="sttSel" aria-label="Speech recognition">
                 <option value="elevenlabs">ElevenLabs</option>
-                <option value="whisper">Whisper (Browser)</option>
+                <option value="whisper" data-i18n="sttOptWhisper">Whisper – lokales Modell im Browser</option>
                 <option value="deepgram">Deepgram</option>
-                <option value="browser">Web Speech</option>
+                <option value="browser" data-i18n="sttOptBrowser">Browser (Web Speech) – Standard</option>
               </select>
             </label>
+            <p class="prefs-hint prefs-hint--status" id="sttStatus" role="status"></p>
             <div id="whisperModelSlot" class="model-card-slot" hidden></div>
           </div>
           <div class="prefs-group" aria-label="Reply model">
-            <span class="prefs-group-label">Reply model</span>
+            <span class="prefs-group-label" data-i18n="llmLabel">Antwort-KI (LLM)</span>
+            <p class="prefs-hint" data-i18n="llmHelp">Die KI, die auf deine Antworten reagiert.</p>
             <label class="setting setting-row"><span>LLM</span>
               <select id="llmSel" aria-label="Reply model">
                 <option value="ollama">Ollama (Server · Granite 4.2 8B)</option>
-                <option value="granite-3b">Granite 4 · 3B (Browser WebGPU)</option>
-                <option value="gemma-3n-e2b">Gemma 3n · E2B Nano (Browser WebGPU)</option>
+                <option value="granite-3b" data-i18n="llmOptBrowser1">Granite 4 · 3B (im Browser, WebGPU)</option>
+                <option value="gemma-3n-e2b" data-i18n="llmOptBrowser2">Gemma 3n · E2B Nano (im Browser, WebGPU)</option>
               </select>
             </label>
+            <p class="prefs-hint prefs-hint--status" id="llmStatus" role="status"></p>
             <div id="llmModelSlot" class="model-card-slot" hidden></div>
-            <p class="prefs-hint">Browser WebGPU runs reply + 5-slot extract on the same loaded model (switching back to Ollama unloads RAM).</p>
           </div>
           <div class="prefs-group" aria-label="Speech output">
-            <span class="prefs-group-label">Speech output</span>
+            <span class="prefs-group-label" data-i18n="ttsLabel">Sprachausgabe (TTS)</span>
             <label class="setting setting-row"><span>TTS</span>
               <select id="ttsSel" aria-label="Text to speech">
-                <option value="local" selected>Browser TTS (download, default)</option>
-                <option value="browser">Web Speech</option>
+                <option value="local" selected data-i18n="ttsOptLocal">Stimme im Browser (lädt einmalig, Standard)</option>
+                <option value="browser" data-i18n="ttsOptBrowser">Stimme des Betriebssystems (Web Speech)</option>
                 <option value="elevenlabs">ElevenLabs</option>
               </select>
             </label>

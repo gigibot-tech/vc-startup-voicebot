@@ -22,6 +22,7 @@ import { createVoice } from "./features/voice/voice.js";
 import { createLiveKitVoice } from "./features/voice/voice-livekit.js";
 import { createVoiceSwitch } from "./features/voice/voice-mode.js";
 import { createMicListener, resampleTo16k } from "./features/voice/browser-listen.js";
+import { describeModelBanner } from "./features/prefs/tech-status.js";
 import { applyAvailability } from "./features/prefs/availability.js";
 import { createWebSpeechListener, isWebSpeechSupported } from "./features/voice/web-speech-listen.js";
 import { createCues } from "./features/voice/cues.js";
@@ -407,10 +408,12 @@ modelManager.setProcessBannerHook((info) => {
   // Don't clobber an in-flight turn/extract banner.
   if (appState.processBusy && appState.processBusy.kind !== "model") return;
   const sid = activeId() || "model";
+  // Plain words: say WHICH model loads and that talking already works (speech recognition is separate).
+  const plain = describeModelBanner({ slot: info.slot, state: info.state, progress: info.progress, lang: prefs.lang });
   setProcessBusy({
     kind: "model",
     sessionId: sid,
-    message: info.message || "Loading model…",
+    message: plain || info.message || "Loading model…",
   });
 });
 
