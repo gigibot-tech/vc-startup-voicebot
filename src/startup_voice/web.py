@@ -37,7 +37,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from startup_voice.features.board import routes as board_routes
@@ -52,6 +52,7 @@ from startup_voice.features.sessions.registry import SessionRegistry
 from startup_voice.features.sessions.store import FileSessionStore
 from startup_voice.features.voice import routes as voice_routes
 from startup_voice.features.voice import get_router
+from startup_voice.version import app_version
 
 _ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_ROOT / ".env")
@@ -153,10 +154,11 @@ def create_app(*, llm: ConfigurableLLM | None = None) -> FastAPI:
         }
 
     @app.get("/")
-    def index() -> FileResponse:
+    def index() -> HTMLResponse:
         """The single HTML page; all behaviour is in the ES modules it loads."""
-        return FileResponse(
-            _STATIC / "index.html",
+        html = (_STATIC / "index.html").read_text(encoding="utf-8")
+        return HTMLResponse(
+            html.replace("__APP_VERSION__", app_version()),
             headers={
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
                 "Pragma": "no-cache",

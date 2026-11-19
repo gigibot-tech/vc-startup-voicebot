@@ -1,4 +1,4 @@
-"""Real intake-style turns (iDoo founder dumps) — coverage + ASK_NOW after extract.
+"""Real intake-style turns (iDoo founder dumps) — coverage + ASK_1/ASK_2 after extract.
 
 These mirror the spoken transcripts used in manual QA: long product / journey answers
 must fill Produkt and steer the next question off Produkt (no mega re-probe).
@@ -9,15 +9,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from startup_voice.domain import DIMENSIONS_SPEC, InterviewSession
+from startup_voice.domain import DIMENSIONS_SPEC, InterviewSession, TurnMessage
 from startup_voice.features.dossier.scoring import evaluate_session, refresh_evaluation
 from startup_voice.features.interview.pipeline import InterviewPipeline
 from startup_voice.features.interview.prompts import (
     DEFAULT_REPLY_SYSTEM,
-    build_gap_queue,
     build_reply_prompt,
-    pick_also_ask,
-    pick_ask_focus,
+    pick_reply_fields,
 )
 from startup_voice.features.sessions.store import FileSessionStore
 
@@ -157,7 +155,7 @@ def _extract_journey_payload() -> str:
 
 
 class IdooStubLLM:
-    """Extract returns iDoo facts; reply records ASK_NOW from the user prompt."""
+    """Extract returns iDoo facts; reply records ASK_1 from the user prompt."""
 
     def __init__(self) -> None:
         self.reply_users: list[str] = []
@@ -243,7 +241,7 @@ class IdooStubLLM:
         # Reply call
         self.reply_systems.append(system)
         self.reply_users.append(user)
-        ask_line = next((ln for ln in user.splitlines() if ln.startswith("ASK_NOW")), "")
+        ask_line = next((ln for ln in user.splitlines() if ln.startswith("ASK_1")), "")
         # Must not re-probe Produkt when coverage is full — ask next gap.
         if ": product" in ask_line:
             return (
@@ -285,13 +283,18 @@ def test_coverage_is_filled_over_required_fields():
     assert ev.next_focus_slot != "product"
 
 
-def test_pick_ask_focus_leaves_full_product():
-    cov = {"team": 0.0, "product": 1.0, "traction": 0.0, "market": 0.0, "financing": 0.0}
-    ask = pick_ask_focus(prior_focus="product", coverages=cov, missing_in_focus=[])
-    assert ask == "team"
+def test_pick_reply_fields_leaves_full_product():
+    session = InterviewSession.create(language="en")
+    for key, val in _product_full().items():
+        session.objects["product"].fields[key] = val
+    asks, backup = pick_reply_fields(session)
+    assert asks[0] == "team.founders_roles"
+    assert len(asks) == 2
+    assert asks[1].split(".")[0] != "team"
+    assert not any(k.startswith("product.") for k in asks + [backup or ""])
 
 
-def test_build_reply_prompt_ask_now_not_product_when_product_full():
+def test_build_reply_prompt_ask_1_not_product_when_product_full():
     session = InterviewSession.create(language="en")
     for key, val in _product_full().items():
         session.objects["product"].fields[key] = val
@@ -301,19 +304,17 @@ def test_build_reply_prompt_ask_now_not_product_when_product_full():
     _system, user = build_reply_prompt(
         session,
         IDOO_PRODUCT,
-        "product",
         reply_system_prompt=DEFAULT_REPLY_SYSTEM,
         followup_mode="balanced",
-        slot_question=DIMENSIONS_SPEC["product"].prompt_hints[0],
     )
-    ask_line = next(ln for ln in user.splitlines() if ln.startswith("ASK_NOW"))
+    ask_line = next(ln for ln in user.splitlines() if ln.startswith("ASK_1"))
     assert ": team" in ask_line, ask_line
-    assert "already_answered" in user
+    assert "ALREADY_ANSWERED" in user
     assert "product.problem" in user
 
 
 def test_idoo_turn1_fills_product_then_turn2_leaves_product(tmp_path: Path):
-    """Reply runs before extract; after Produkt is full, the *next* ASK_NOW leaves it."""
+    """Reply runs before extract; after Produkt is full, the *next* ASK_1 leaves it."""
     store = FileSessionStore(tmp_path)
     llm = IdooStubLLM()
     pipe = InterviewPipeline(llm, store)
@@ -327,7 +328,7 @@ def test_idoo_turn1_fills_product_then_turn2_leaves_product(tmp_path: Path):
     assert llm.reply_users, "reply LLM must run (Thinking…) before extract"
 
     session = pipe.process_turn(session, IDOO_JOURNEY)
-    ask_line = next(ln for ln in llm.reply_users[-1].splitlines() if ln.startswith("ASK_NOW"))
+    ask_line = next(ln for ln in llm.reply_users[-1].splitlines() if ln.startswith("ASK_1"))
     assert ": product" not in ask_line, (
         f"must not re-ask Produkt once coverage is full, got {ask_line!r}"
     )
@@ -356,20 +357,20 @@ def test_idoo_five_turns_breadth(tmp_path: Path):
     # financing filled from product/journey extracts
     assert cov["financing"] >= 2 / 3
 
-    # From turn 2 on, product is already full → ASK_NOW must leave it
+    # From turn 2 on, product is already full → no ASK may touch it
     for user in llm.reply_users[1:]:
-        ask_line = next((ln for ln in user.splitlines() if ln.startswith("ASK_NOW")), "")
-        assert ": product" not in ask_line, ask_line
+        for prefix in ("ASK_1", "ASK_2"):
+            line = next((ln for ln in user.splitlines() if ln.startswith(prefix)), "")
+            assert ": product" not in line, line
 
 
-def test_market_turn8_gap_queue_surfaces_financing_as_next_slot():
-    """Reproduces session 13ad8598748c turn 8: market is ASK_NOW pre-extract,
-    but Founder just answered market size + moat ('großer markt an universitäten…
-    andere platformen haben meistens nur matching'). GAP_QUEUE must hand the
-    reply LLM NEXT_SLOT=financing so it jumps instead of echoing/re-asking market.
+def test_market_turn8_next_turn_moves_off_last_asked_fields():
+    """Reproduces session 13ad8598748c turn 8: market was just asked and answered
+    ('großer markt an universitäten… andere platformen haben meistens nur matching')
+    before the dossier caught up. The next reply must NOT re-ask those market fields —
+    it skips last turn's fields and moves to financing.
     """
     from startup_voice.features.dossier.review import merge_slot_update
-    from startup_voice.features.interview.prompts import build_gap_queue
 
     session = InterviewSession.create(language="de")
     for s in ("team", "product", "traction"):
@@ -381,11 +382,12 @@ def test_market_turn8_gap_queue_surfaces_financing_as_next_slot():
     session.objects["financing"].fields["use_of_funds"] = "Kampagnen"
     session.objects["financing"].belege = 0.7
     refresh_evaluation(session)
-    assert session.evaluation.next_focus_slot == "market"
-
-    q = build_gap_queue(session, primary="market")
-    assert [entry["slot"] for entry in q] == ["market", "financing"]
-    assert q[1]["missing_fields"] == ["raise_amount_round", "runway_milestones"]
+    session.messages.append(
+        TurnMessage(role="assistant", content="Wie groß ist der Markt und wer sind eure Wettbewerber?")
+    )
+    session.last_asked_fields = ["market.market_size", "market.competitors_moat"]
+    session.last_asked_turn = 7
+    session.turn_index = 8
 
     utterance = (
         "großer markt an universitäten in deutschland + science und startups "
@@ -394,15 +396,22 @@ def test_market_turn8_gap_queue_surfaces_financing_as_next_slot():
     sys_prompt, user_prompt = build_reply_prompt(
         session,
         utterance,
-        "market",
         reply_system_prompt=DEFAULT_REPLY_SYSTEM,
         followup_mode="balanced",
-        slot_question="",
     )
-    assert "NEXT_SLOT if Founder just answered ASK_NOW: financing" in user_prompt
-    assert "GAP_QUEUE" in user_prompt
+    assert "ASK_1: financing.raise_amount_round" in user_prompt
+    assert "ASK_2: financing.runway_milestones" in user_prompt
+    assert "market." not in user_prompt.split("ALREADY_ANSWERED", 1)[0]
+    assert "LAST_QUESTION (do NOT repeat or paraphrase):\nWie groß ist der Markt" in user_prompt
     assert "NOT in dossier yet — credit this first!" in user_prompt
-    assert "jump to NEXT_SLOT" in sys_prompt
+    assert "NEVER repeat or paraphrase LAST_QUESTION" in sys_prompt
+    assert session.last_asked_fields == ["financing.raise_amount_round", "financing.runway_milestones"]
+
+    # Retry of the same turn keeps the same picks.
+    _sys2, user2 = build_reply_prompt(
+        session, utterance, reply_system_prompt=DEFAULT_REPLY_SYSTEM, followup_mode="balanced"
+    )
+    assert "ASK_1: financing.raise_amount_round" in user2
 
     # Also guard the string-evidence bug seen in 13ad8598748c ("S","o","u","r"…)
     merge_slot_update(
@@ -552,17 +561,12 @@ def test_context_and_token_limit_warning_embedded_in_assistant_message(tmp_path:
     assert "Kontext-/Tokenlimit" in last_msg.warning
 
 
-def test_focus_slots_tuple_surfaces_both_detail_and_next_rotation_for_llm():
-    """Reproduces session f6402c47500d turn 11:
-    Only traction.growth_signal and financing.runway_milestones are still empty.
-    pick_next_focus_slots / FOCUS_SLOTS is the ordered tuple ('traction', 'financing')
-    (or size 1 ('financing',) once traction is filled), giving the LLM both:
-      - ASK_NOW = traction (missing=['growth_signal']) for a detailed probe if needed
-      - NEXT_SLOT = financing (missing=['runway_milestones']) as the rotation target
-    so the LLM judges whether to probe detail on focus_slots[0] or rotate to focus_slots[1].
+def test_two_open_fields_are_both_asked_then_re_ask_note():
+    """Reproduces session f6402c47500d turn 11: only traction.growth_signal and
+    financing.runway_milestones are open → ASK_1 + ASK_2 cover both. If the next turn
+    still has only those open, the prompt says RE_ASK (different angle) instead of
+    silently repeating.
     """
-    from startup_voice.features.interview.prompts import pick_ask_focus_tuple
-
     session = InterviewSession.create(language="en")
     for s in ("team", "product", "market"):
         for f in DIMENSIONS_SPEC[s].required_fields:
@@ -570,42 +574,30 @@ def test_focus_slots_tuple_surfaces_both_detail_and_next_rotation_for_llm():
         session.objects[s].belege = 0.8
     session.objects["traction"].fields["customers_pilots"] = "0 users"
     session.objects["traction"].fields["metrics_revenue"] = "no income"
-    session.objects["traction"].fields["growth_signal"] = ""
     session.objects["financing"].fields["raise_amount_round"] = "five to six digit"
     session.objects["financing"].fields["use_of_funds"] = "hire people"
-    session.objects["financing"].fields["runway_milestones"] = ""
     refresh_evaluation(session)
 
-    assert session.evaluation.next_focus_slots == ["traction", "financing"]
-    assert pick_ask_focus_tuple(
-        prior_focus="traction",
-        coverages=session.evaluation.slot_coverage,
-        missing_in_focus=["growth_signal"],
-    ) == ("traction", "financing")
-
-    _sys, user_prompt = build_reply_prompt(
+    sys_prompt, user_prompt = build_reply_prompt(
         session,
         "Now it's pretty flat and yeah",
-        session.evaluation.next_focus_slots,
         reply_system_prompt=DEFAULT_REPLY_SYSTEM,
         followup_mode="balanced",
-        slot_question="",
     )
-    assert "FOCUS_SLOTS (balanced/depth): ['traction', 'financing']" in user_prompt
-    assert "ASK_NOW: traction" in user_prompt
-    assert "ALSO_ASK (same reply, one other open field): financing.runway_milestones" in user_prompt
-    assert "ask TWO short questions" in _sys
-    assert "missing=['growth_signal']" in user_prompt
-    assert "NEXT_SLOT if Founder just answered ASK_NOW: financing" in user_prompt
-    assert "missing=['runway_milestones']" in user_prompt
+    assert "ASK_1: traction.growth_signal" in user_prompt
+    assert "ASK_2: financing.runway_milestones" in user_prompt
+    assert "BACKUP (only if Founder just said already answers ASK_1 or ASK_2): none" in user_prompt
+    assert "Ask ASK_1 and ASK_2 as TWO short questions" in sys_prompt
+    assert "RE_ASK" not in user_prompt
 
-    # Once traction.growth_signal is filled, next_focus_slots shrinks to size 1: ['financing']
-    session.objects["traction"].fields["growth_signal"] = "flat"
-    refresh_evaluation(session)
-    assert session.evaluation.next_focus_slots == ["financing"]
+    session.turn_index += 1
+    _sys, user_next = build_reply_prompt(
+        session, "hmm", reply_system_prompt=DEFAULT_REPLY_SYSTEM, followup_mode="balanced"
+    )
+    assert "RE_ASK:" in user_next
 
 
-def test_also_ask_is_absent_when_only_one_field_remains():
+def test_ask_2_is_none_when_only_one_field_remains():
     session = InterviewSession.create(language="de")
     for slot in DIMENSIONS_SPEC:
         for field in DIMENSIONS_SPEC[slot].required_fields:
@@ -615,24 +607,25 @@ def test_also_ask_is_absent_when_only_one_field_remains():
     _sys, user = build_reply_prompt(
         session,
         "200k preseed",
-        "financing",
         reply_system_prompt=DEFAULT_REPLY_SYSTEM,
         followup_mode="balanced",
-        slot_question="",
     )
-    assert "ALSO_ASK: none" in user
+    assert "ASK_1: financing.runway_milestones" in user
+    assert "ASK_2: none" in user
 
 
-def test_also_ask_varies_and_skips_the_ask_now_field():
+def test_ask_2_varies_skips_ask_1_and_last_asked():
     session = InterviewSession.create(language="de")
-    refresh_evaluation(session)
-    queue = build_gap_queue(session, primary="team")
+    session.last_asked_fields = ["team.founders_roles"]
     seen: set[str] = set()
     for _ in range(40):
-        picked = pick_also_ask(session, "team", ["founders_roles", "background_expertise"], queue)
-        assert picked is not None
-        assert not (picked["slot"] == "team" and picked["field"] == "founders_roles")
-        seen.add(f"{picked['slot']}.{picked['field']}")
+        asks, backup = pick_reply_fields(session)
+        assert asks[0] == "team.background_expertise"
+        assert asks[1] != asks[0]
+        assert asks[1].split(".")[0] != "team"
+        assert "team.founders_roles" not in asks
+        assert backup not in asks
+        seen.add(asks[1])
     assert len(seen) >= 2
 
 

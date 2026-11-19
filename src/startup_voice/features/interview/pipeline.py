@@ -9,7 +9,7 @@ Per user turn — reply FIRST (Thinking…), then dossier extract ALWAYS after t
 
 UI order is fixed: Thinking… → spoken reply → Updating dossier…
 SSE: reply chunks → ReplyDone (TTS + mic unlock, needs_extract=True) → EXTRACT_PHASE → done.
-ASK_NOW uses coverage from the *prior* extract (no keyword topic guessing).
+Reply fields (ASK_1/ASK_2) come from the *prior* extract and skip last turn's fields.
 ``refresh_evaluation`` runs after mutations — ``FileSessionStore.save`` does not re-score.
 
 Side paths:
@@ -595,10 +595,8 @@ class InterviewPipeline:
         return build_reply_prompt(
             session,
             user_text,
-            focus,
             reply_system_prompt=cfg.reply_system_prompt,
             followup_mode=self._session_followup_mode(session),
-            slot_question=cfg.question_for(focus or "team"),
         )
 
     def _run_reply(

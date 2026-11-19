@@ -12,18 +12,17 @@ calls in strict sequence (never in parallel, so TTS starts immediately):
   ├─────────────────────────────────────────────────────────────────────────┤
   │ • UI state : "Thinking…" bubble -> streams spoken question -> TTS plays │
   │ • System   : editable reply_system_prompt                               │
-  │              + REPLY_NO_REASK (credit latest statement before asking)   │
+  │              + REPLY_RULES (ask ASK_1 + ASK_2, never repeat last)      │
   │              + REPLY_END_GATE (optional trailing [[intake:end]])        │
   │              + language suffix (DE / EN)                                │
-  │ • User     : 7 compact sections (no duplicate full-dossier JSON dump):  │
-  │              1. ASK_NOW        current slot + missing fields + blueprint│
-  │              2. NEXT_SLOT      fallback slot if Founder just covered #1 │
-  │              3. GAP_QUEUE      ordered remaining incomplete slots       │
-  │              4. already_answered flat map of filled slot.field values   │
-  │              5. Recent transcript last 6 messages                       │
-  │              6. Founder just said (all unextracted user turns)          │
-  │              7. FORBIDDEN to repeat + followup mode instruction         │
-  │ • Output   : 1–2 spoken sentences (+ optional trailing [[intake:end]])  │
+  │ • User     : ASK_1 + ASK_2 + BACKUP  (picked in Python, skipping the    │
+  │                                     fields asked last turn)             │
+  │              ALREADY_ANSWERED  flat map of filled slot.field values     │
+  │              LAST_QUESTION     previous assistant msg (never repeat)    │
+  │              Recent transcript last 6 messages                          │
+  │              Founder just said (all unextracted user turns)             │
+  │ • Output   : TWO short questions (ASK_1 + ASK_2)                        │
+  │              (+ optional trailing [[intake:end]])                       │
   └─────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼  (mic unlocks + TTS speaks Reply #1)
@@ -34,7 +33,7 @@ calls in strict sequence (never in parallel, so TTS starts immediately):
   │ • System   : EXTRACT_SYSTEM (strict JSON schema: updates + confidence   │
   │              + missing_or_vague + belege)                               │
   │ • User     : build_extract_user():                                      │
-  │              - per turn: SLOT_GATES (all 5 aspects; NOT ASK_NOW)        │
+  │              - per turn: SLOT_GATES (all 5 aspects, no reply focus)     │
   │              - on-demand: MISSING_FOCUS (open gaps, lowest coverage     │
   │                first) + full conversation                               │
   │              - Founder statement(s) (SOURCE OF TRUTH)                   │
@@ -86,41 +85,34 @@ REPLY_END_GATE = (
     "wrap-up in the session language (e.g. dossier is ready — they can continue asking "
     "or finalize in the UI), then on its OWN last line write exactly [[intake:end]].\n"
     "- Do NOT finalize yourself. Do NOT keep drilling filled answers.\n"
-    "- If ASK_NOW still has a real empty gap, ask 1–2 short questions and omit "
-    "[[intake:end]].\n"
+    "- While ASK_1 is set, ask your questions and omit [[intake:end]].\n"
     "- Never say the marker aloud. Order of trailing lines if both apply: "
     "[[dossier:yes|no]] then [[intake:end]]."
 )
 
 # Always appended (even when reply_system_prompt is customized in interview_config.json).
 # NOTE: avoid the substring "extract" here — test stubs dispatch on '"extract" in system.lower()'.
-REPLY_NO_REASK = (
-    "\n\nHARD RULE — reply before dossier update (dossier is 1 turn behind 'Founder just said'):\n"
-    "- Dossier fields reflect turns BEFORE 'Founder just said'.\n"
-    "- Look at FOCUS_SLOTS = (ASK_NOW, NEXT_SLOT, ...) in GAP_QUEUE and judge:\n"
-    "  1) Credit everything 'Founder just said' already answers (any qualitative, approximate, "
-    "partial, or negative/flat answer counts as answered for that field — never demand exact "
-    "numbers, dates, or both halves of a compound concept when the founder already gave a "
-    "reasonable answer).\n"
-    "  2) You decide whether to probe a still-unanswered detail in ASK_NOW (focus_slots[0]) "
-    "OR rotate to NEXT_SLOT (focus_slots[1]):\n"
-    "     • If ALSO_ASK is set and 'Founder just said' did not already cover ASK_NOW: ask TWO "
-    "short questions in the same reply — one still-open ASK_NOW field AND the ALSO_ASK field. "
-    "Do not ask only ASK_NOW.\n"
-    "     • If ASK_NOW still has an unasked missing_field that 'Founder just said' did not "
-    "address yet and ALSO_ASK is none: ask a short, specific question on THAT missing field.\n"
-    "     • If 'Founder just said' already answered (even roughly, qualitatively, or with "
-    "0/none/flat) the question you just asked on ASK_NOW: do NOT repeat or re-drill that "
-    "question — jump to NEXT_SLOT in GAP_QUEUE!\n"
-    "     • If len(FOCUS_SLOTS) == 1 (only ONE open slot left) and it still has an unasked "
-    "missing_field: briefly mention to the founder that this is the LAST open question before "
-    "the dossier is complete (e.g. 'Letzte kurze Frage vor dem Abschluss:' / 'One final "
-    "question to complete your dossier:'), then ask that final missing field.\n"
-    "     • If len(FOCUS_SLOTS) == 1 and 'Founder just said' now covers that last open field: "
-    "wrap up immediately and emit [[intake:end]].\n"
-    "- NEVER repeat or paraphrase your previous question from Recent transcript.\n"
-    "- NEVER re-ask already_answered fields."
+REPLY_RULES = (
+    "\n\nYOUR TASK THIS TURN (the dossier is 1 turn behind 'Founder just said'):\n"
+    "1) At most one short clause acknowledging 'Founder just said'.\n"
+    "2) Ask ASK_1 and ASK_2 as TWO short questions, one each. If 'Founder just said' already "
+    "answers one of them (even roughly, or with 0 / none / noch nicht), ask BACKUP instead.\n"
+    "3) NEVER repeat or paraphrase LAST_QUESTION (unless RE_ASK says so), and never ask "
+    "about ALREADY_ANSWERED.\n"
+    "4) Only ASK_1 given (ASK_2: none): say it is the last question before the dossier is "
+    "complete ('Letzte kurze Frage:' / 'One last question:') and ask just that one.\n"
+    "5) ASK_1: none, or 'Founder just said' answers the last open field: short wrap-up, "
+    "then [[intake:end]]."
 )
+
+# Backwards-compatible alias (old name).
+REPLY_NO_REASK = REPLY_RULES
+
+FOLLOWUP_MODE_HINTS: dict[str, str] = {
+    "balanced": "accept reasonable answers and keep moving across slots",
+    "insist": "if an answer is vague, prefer a concrete probe (number, name, date) on another open field",
+    "strict": "ask for concrete evidence on each open field before the dossier is considered done",
+}
 
 
 def split_reply_dossier_mark(raw: str) -> tuple[str, bool]:
@@ -176,7 +168,7 @@ def split_reply_marks(raw: str) -> tuple[str, bool, bool]:
 # Two selectable modes (InterviewConfig.extract_mode, default = "full"):
 #   • "full"  (DEFAULT) : SLOT_GATES (all 5 aspects) + Transcript + Latest founder statement
 #                         with EXTRACT_SYSTEM. Extract searches EACH slot independently —
-#                         it is NOT interview ASK_NOW / NEXT_SLOT (those are reply-only).
+#                         it does NOT follow the reply's question choice.
 #   • "delta" (FAST)    : sends only Previous assistant question + Already in dossier
 #                         + Latest founder statement with EXTRACT_DELTA_SYSTEM so the
 #                         LLM only emits newly changed fields (~3–4× fewer output tokens).
@@ -283,25 +275,16 @@ CONTINUE_QUESTION_SYSTEM = (
 # 2) REPLY / GREETING / QUESTIONS - editable defaults (see config.InterviewConfig)
 # ---------------------------------------------------------------------------
 DEFAULT_REPLY_SYSTEM = (
-    "You are a VC analyst leading a spoken first conversation in German.\n"
-    "Pace: with substantive answers, cover all five slots (Team, Produkt, Traktion, Markt, "
-    "Finanzierung) in about 5 founder turns — breadth over perfectionism.\n"
-    "Interview strategy is BREADTH THEN DEPTH:\n"
-    "1) BREADTH: ask the NEXT empty dimension (ASK_NOW). Never re-drill a slot that is "
-    "already filled or that the founder just covered while other slots are empty.\n"
-    "2) DEPTH: only when phase=depth AND that slot still has empty fields — short probes "
-    "on those empties only.\n"
-    "Rules:\n"
-    "- Acknowledge ≤1 short clause, then 1–2 SHORT questions aimed at empty fields/slots "
-    "(two questions OK when they hit two different empty gaps, e.g. Team + Traktion).\n"
-    "- Spoken German, ≤2 sentences total, no markdown, no essay questions.\n"
-    "- NEVER yes/no-only. Accept nein/0/keine and move on.\n"
-    "- Never repeat your previous question.\n"
-    "- Forbidden: re-asking already_answered; mega compound re-probes of Produkt when "
-    "Produkt is filled / just covered.\n"
-    "- If ready_for_closing is true OR no useful empty gap remains: short wrap-up that the "
-    "dossier is ready for their review — they choose Continue or Finalize in the UI "
-    "(then [[intake:end]]); do not pretend to finalize yourself."
+    "You are a VC analyst leading a spoken first intake call in German.\n"
+    "Goal: fill all open dossier fields (Team, Produkt, Traktion, Markt, Finanzierung) in "
+    "about 5 founder turns — breadth over perfection.\n"
+    "Every reply:\n"
+    "- At most one short acknowledging clause, then TWO short questions on two different "
+    "open fields.\n"
+    "- Spoken German, ≤2 sentences, no markdown, no essay or yes/no-only questions.\n"
+    "- Accept nein / 0 / keine as a valid answer and move on.\n"
+    "- When nothing useful is left open: short wrap-up that the dossier is ready for review "
+    "(they choose Continue or Finalize in the UI), then [[intake:end]]. Never finalize yourself."
 )
 
 DEFAULT_GREETING = (
@@ -408,7 +391,7 @@ def build_missing_focus(session: InterviewSession) -> list[dict[str, Any]]:
 
 
 def build_slot_gates(session: InterviewSession) -> list[dict[str, Any]]:
-    """Per-slot extract gates: aspects to hunt in the conversation (not ASK_NOW)."""
+    """Per-slot extract gates: aspects to hunt in the conversation."""
     gates: list[dict[str, Any]] = []
     for slot in SLOT_ORDER:
         spec = DIMENSIONS_SPEC[slot]
@@ -436,89 +419,53 @@ def build_slot_gates(session: InterviewSession) -> list[dict[str, Any]]:
     return gates
 
 
-def pick_ask_focus_tuple(
-    *,
-    prior_focus: SlotId,
-    coverages: dict[str, float],
-    missing_in_focus: list[str],
-) -> tuple[SlotId, ...]:
-    """Return the ordered tuple of incomplete focus slots ``(slot_1, slot_2, ...)`` (size 1..5).
+def open_field_keys(session: InterviewSession) -> list[str]:
+    """Every still-empty required field as ``"slot.field"`` (slot order)."""
+    return [
+        f"{slot}.{fname}"
+        for slot, missing in missing_fields_by_slot(session).items()
+        for fname in missing
+    ]
 
-    How ``slot_coverage`` works per slot (computed in ``scoring.py``):
-      - 0 / 3 required fields filled -> ``0.0``
-      - 1 / 3 required fields filled -> ``0.333``
-      - 2 / 3 required fields filled -> ``0.667``
-      - 3 / 3 required fields filled -> ``1.0``
 
-    Order:
-      1) ``prior_focus`` stays first if it still has ``missing_in_focus``.
-      2) Every other slot in ``SLOT_ORDER`` with ``slot_coverage < 1.0``.
-      3) Fallback ``(prior_focus,)`` (size 1) when all slots are at ``1.0``.
+def field_hint(key: str) -> str:
+    """``"slot.field — what to ask"`` line for the reply prompt."""
+    return f"{key} — {FIELD_QUESTION_HINTS.get(key, key.split('.', 1)[-1])}"
+
+
+def pick_reply_fields(session: InterviewSession) -> tuple[list[str], str | None]:
+    """Choose the two fields the next reply asks, plus one backup.
+
+    Small models (e.g. Granite 3B) phrase questions well but choose badly, so Python
+    picks. Fields asked in the previous reply (``session.last_asked_fields``) are skipped:
+    the founder is answering them right now and the dossier does not know it yet. They
+    come back only when nothing else is open.
+
+    ASK_1 = first fresh open field (slot order = breadth). ASK_2 = random fresh field from
+    a different slot when possible. BACKUP = another fresh field, in case the founder just
+    answered ASK_1 or ASK_2.
     """
-    ordered: list[SlotId] = []
-    if missing_in_focus:
-        ordered.append(prior_focus)
-    for slot in SLOT_ORDER:
-        if slot not in ordered and float(coverages.get(slot) or 0) < 1.0:
-            ordered.append(slot)
-    if not ordered:
-        ordered.append(prior_focus)
-    return tuple(ordered)
+    open_keys = open_field_keys(session)
+    recent = set(session.last_asked_fields or [])
+    fresh = [k for k in open_keys if k not in recent] or open_keys
+    if not fresh:
+        return [], None
+    first = fresh[0]
+    first_slot = first.split(".", 1)[0]
+    rest = [k for k in fresh if k != first]
+    other_slot = [k for k in rest if k.split(".", 1)[0] != first_slot]
+    second = random.choice(other_slot or rest) if rest else None
+    asks = [first] + ([second] if second else [])
+    backup = next((k for k in rest if k not in asks), None)
+    return asks, backup
 
 
-def pick_ask_focus(
-    *,
-    prior_focus: SlotId,
-    coverages: dict[str, float],
-    missing_in_focus: list[str],
-) -> SlotId:
-    """First element of ``pick_ask_focus_tuple`` (kept for callers expecting a single SlotId)."""
-    return pick_ask_focus_tuple(
-        prior_focus=prior_focus,
-        coverages=coverages,
-        missing_in_focus=missing_in_focus,
-    )[0]
-
-
-def build_gap_queue(
-    session: InterviewSession, *, primary: SlotId | tuple[SlotId, ...]
-) -> list[dict[str, Any]]:
-    """Build the ordered array of incomplete slot targets for ``FOCUS_SLOTS``.
-
-    Each entry gives the LLM everything needed to either ask a detailed follow-up on
-    ``queue[0]`` OR rotate to ``queue[1]``:
-      - ``slot``: slot id
-      - ``label``: human label
-      - ``coverage``: ``0.0 | 0.333 | 0.667 | 1.0``
-      - ``missing_fields``: required fields still empty in this slot
-      - ``missing_details``: human descriptions of each missing field
-      - ``blueprint``: full slot question blueprint
-    """
-    cov = session.evaluation.slot_coverage or {}
-    if isinstance(primary, tuple):
-        seed = list(primary)
-    else:
-        seed = [primary]
-    ordered: list[SlotId] = seed + [s for s in SLOT_ORDER if s not in seed]
-    queue: list[dict[str, Any]] = []
-    for slot in ordered:
-        spec = DIMENSIONS_SPEC[slot]
-        st = session.objects[slot]
-        missing = [f for f in spec.required_fields if not (st.fields.get(f) or "").strip()]
-        slot_cov = round(float(cov.get(slot) or 0), 3)
-        if not missing and slot_cov >= 1.0:
-            continue
-        queue.append(
-            {
-                "slot": slot,
-                "label": spec.label,
-                "coverage": slot_cov,
-                "missing_fields": missing,
-                "missing_details": [FIELD_QUESTION_HINTS.get(f"{slot}.{f}", f) for f in missing],
-                "blueprint": DEFAULT_SLOT_QUESTIONS.get(slot, ""),
-            }
-        )
-    return queue
+def last_assistant_message(session: InterviewSession) -> str:
+    """Most recent assistant line (the question the founder is answering now)."""
+    for m in reversed(session.messages):
+        if m.role == "assistant" and (m.content or "").strip():
+            return m.content.strip()
+    return ""
 
 
 def unextracted_user_turns(session: InterviewSession, user_text: str) -> list[str]:
@@ -588,12 +535,12 @@ def build_extract_user(
     Modes (selectable in Settings -> Extract scope):
       - ``"full"``  (DEFAULT): ``SLOT_GATES`` (all 5 aspects) + recent transcript
         + latest founder statement. Extract hunts EACH slot independently —
-        never interview ASK_NOW / NEXT_SLOT.
+        never the reply's question choice.
       - ``"delta"`` (FAST): previous assistant question + already in dossier
         + latest statement (speed comparison). Ignored when ``full_transcript``.
       - ``full_transcript=True`` (on-demand [Dossier extrahieren]): entire
         conversation + ``MISSING_FOCUS`` (open gaps, lowest coverage first).
-    ``focus`` is kept for callers; full/on-demand extract does not bias on ASK_NOW.
+    ``focus`` is kept for callers; extract does not bias on it.
     """
     still_empty = missing_fields_by_slot(session)
     gates_block = (
@@ -658,135 +605,69 @@ def build_score_belege_user(session: InterviewSession, slots: list[SlotId]) -> s
     return json.dumps(payload, ensure_ascii=False)
 
 
-def pick_also_ask(
-    session: InterviewSession,
-    ask: SlotId,
-    missing_in_ask: list[str],
-    gap_queue: list[dict[str, Any]],
-) -> dict[str, str] | None:
-    """One other open field for this reply, chosen at random.
-
-    Never the field ASK_NOW is already asking. Any other empty field, including
-    another field in the same slot, is eligible. None when nothing else is open.
-    """
-    del session  # queue already carries the open fields
-    if not missing_in_ask:
-        return None
-    primary = missing_in_ask[0]
-    candidates: list[dict[str, str]] = []
-    for entry in gap_queue:
-        slot = str(entry.get("slot") or "")
-        fields = list(entry.get("missing_fields") or [])
-        details = list(entry.get("missing_details") or [])
-        for index, field in enumerate(fields):
-            if slot == ask and field == primary:
-                continue
-            candidates.append(
-                {
-                    "slot": slot,
-                    "field": str(field),
-                    "detail": str(details[index] if index < len(details) else field),
-                }
-            )
-    if not candidates:
-        return None
-    return random.choice(candidates)
-
-
 def build_reply_prompt(
     session: InterviewSession,
     user_text: str,
-    focus: SlotId | tuple[SlotId, ...] | list[SlotId] | None,
     *,
     reply_system_prompt: str,
     followup_mode: str,
-    slot_question: str,
 ) -> tuple[str, str]:
     """Build (system, user) for CALL #1 (Spoken Reply).
 
-    Instead of Python hard-coding when to rotate slots, we compute ``focus_slots`` as an
-    ordered tuple ``(slot_1, slot_2, ...)`` (can be size 1 when only 1 slot remains) and
-    hand the LLM both:
-      - ``ASK_NOW`` (``focus_slots[0]``: detailed missing fields if still unanswered)
-      - ``NEXT_SLOT`` (``focus_slots[1]``: next rotation slot if ``Founder just said``
-        already answered or said flat/0/none to ``focus_slots[0]``)
-      - ``GAP_QUEUE`` (full ordered array of open slots with ``coverage``, ``missing_fields``,
-        ``missing_details``, and ``blueprint``)
-    so the LLM judges from ``Recent transcript`` + ``Founder just said`` whether to ask a
-    detailed follow-up on ``focus_slots[0]``, rotate to ``focus_slots[1]``, or combine both.
+    Python picks ASK_1 / ASK_2 / BACKUP (``pick_reply_fields``) and records them in
+    ``session.last_asked_fields`` so the next turn moves on. The LLM only phrases the
+    questions, sees its own LAST_QUESTION and is told never to repeat it.
     """
-    cov = session.evaluation.slot_coverage or {}
-    eval_slots = tuple(session.evaluation.next_focus_slots or ())
-    if isinstance(focus, (tuple, list)) and focus:
-        prior_focus: SlotId = focus[0]
-    elif isinstance(focus, str) and focus:
-        prior_focus = focus
-    elif eval_slots:
-        prior_focus = eval_slots[0]
+    open_keys = open_field_keys(session)
+    reused = [k for k in session.last_asked_fields if k in open_keys]
+    re_ask = False
+    if session.last_asked_turn == session.turn_index and reused:
+        # Same turn rebuilt (Retry / browser prepare): keep the same questions.
+        asks = reused
+        backup = next((k for k in open_keys if k not in asks), None)
     else:
-        prior_focus = session.evaluation.next_focus_slot or "team"
-
-    missing_in_prior = [
-        f
-        for f in DIMENSIONS_SPEC[prior_focus].required_fields
-        if not (session.objects[prior_focus].fields.get(f) or "").strip()
-    ]
-    focus_slots: tuple[SlotId, ...] = pick_ask_focus_tuple(
-        prior_focus=prior_focus,
-        coverages=cov,
-        missing_in_focus=missing_in_prior,
-    )
-    ask: SlotId = focus_slots[0]
-    spec = DIMENSIONS_SPEC[ask]
-    missing_in_ask = [
-        f for f in spec.required_fields if not (session.objects[ask].fields.get(f) or "").strip()
-    ]
-    missing_details_ask = [FIELD_QUESTION_HINTS.get(f"{ask}.{f}", f) for f in missing_in_ask]
-    slot_ask = (
-        (slot_question if ask == prior_focus else DEFAULT_SLOT_QUESTIONS.get(ask, ""))
-        or ", ".join(spec.prompt_hints)
-    )
-
-    gap_queue = build_gap_queue(session, primary=focus_slots)
-    next_entry = gap_queue[1] if len(gap_queue) > 1 else None
-    next_slot_hint = (
-        f"{next_entry['slot']} ({next_entry['label']}) — "
-        f"missing={next_entry['missing_fields']} ({next_entry['missing_details']}) — "
-        f"blueprint: {next_entry['blueprint']}"
-        if next_entry
-        else "none (only 1 slot left in FOCUS_SLOTS; if Founder just covered it, wrap up + [[intake:end]])"
-    )
-    also = pick_also_ask(session, ask, missing_in_ask, gap_queue)
-    also_line = (
-        f"ALSO_ASK (same reply, one other open field): {also['slot']}.{also['field']} — {also['detail']}\n"
-        if also
-        else "ALSO_ASK: none (no second open field)\n"
-    )
+        re_ask = bool(open_keys) and set(open_keys) <= set(session.last_asked_fields or [])
+        asks, backup = pick_reply_fields(session)
+        session.last_asked_fields = list(asks)
+        session.last_asked_turn = session.turn_index
 
     pending_turns = unextracted_user_turns(session, user_text)
     combined_user = "\n".join(pending_turns)
-    phase = "breadth" if any(float(cov.get(s) or 0) <= 0 for s in SLOT_ORDER) else "depth"
+    last_q = last_assistant_message(session)
+    mode = (followup_mode or "balanced").strip().lower()
+    mode_hint = FOLLOWUP_MODE_HINTS.get(mode, FOLLOWUP_MODE_HINTS["balanced"])
     unextracted_note = (
-        f"NOTE: {len(pending_turns)} founder messages below were sent while the dossier was still updating — credit ALL of them!\n"
+        f"NOTE: {len(pending_turns)} founder messages below were sent while the dossier was "
+        "still updating — credit ALL of them!\n"
         if len(pending_turns) > 1
         else ""
     )
+    re_ask_note = (
+        "RE_ASK: only fields from LAST_QUESTION are still open — if 'Founder just said' does "
+        "not answer them, ask once more, shorter and from a different angle.\n"
+        if re_ask
+        else ""
+    )
+    ask_1 = field_hint(asks[0]) if asks else "none — every field is filled (wrap up + [[intake:end]])"
+    ask_2 = field_hint(asks[1]) if len(asks) > 1 else "none"
 
     user = (
-        f"FOCUS_SLOTS ({followup_mode}/{phase}): {list(focus_slots)}\n"
-        f"ASK_NOW: {ask} ({spec.label}, coverage={float(cov.get(ask) or 0):.2f}) — "
-        f"missing={missing_in_ask or 'none'} ({missing_details_ask}) — blueprint: {slot_ask}\n"
-        f"NEXT_SLOT if Founder just answered ASK_NOW: {next_slot_hint}\n"
-        f"{also_line}"
-        f"GAP_QUEUE (ordered): {json.dumps(gap_queue, ensure_ascii=False)}\n"
-        f"already_answered (FORBIDDEN to re-ask): {json.dumps(filled_fields_map(session), ensure_ascii=False)}\n"
+        f"ASK_1: {ask_1}\n"
+        f"ASK_2: {ask_2}\n"
+        f"BACKUP (only if Founder just said already answers ASK_1 or ASK_2): "
+        f"{field_hint(backup) if backup else 'none'}\n"
+        f"{re_ask_note}"
+        f"OPEN_FIELDS_LEFT: {len(open_keys)}\n"
+        f"FOLLOWUP_MODE: {mode} — {mode_hint}\n"
+        f"ALREADY_ANSWERED (never re-ask): {json.dumps(filled_fields_map(session), ensure_ascii=False)}\n"
+        f"LAST_QUESTION (do NOT repeat or paraphrase):\n{last_q[:500] or 'none'}\n"
         f"Recent transcript:\n{recent_history(session, last=6)}\n"
         f"{unextracted_note}"
         f"Founder just said (NOT in dossier yet — credit this first!): {combined_user[:1200]}"
     )
     system = (
         (reply_system_prompt or "").rstrip()
-        + REPLY_NO_REASK
+        + REPLY_RULES
         + REPLY_END_GATE
         + reply_prompt_suffix(session.language)
     )
