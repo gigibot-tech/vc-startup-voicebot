@@ -10,6 +10,16 @@
 [functions]
   node_bundler = "esbuild"
 
+[[redirects]]
+  from = "/board"
+  to = "/static/features/board/board.html"
+  status = 200
+
+[[redirects]]
+  from = "/d/*"
+  to = "/static/features/board/dossier.html"
+  status = 200
+
 [dev]
   framework = "#static"
   publish = "dist"

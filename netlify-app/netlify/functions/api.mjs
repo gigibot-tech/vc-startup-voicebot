@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +50,7 @@ const lazyStore = (name) => {
 };
 const sessionBlobs = isNetlify ? lazyStore("startup-voice-sessions") : null;
 const configBlobs = isNetlify ? lazyStore("startup-voice-config") : null;
+const boardBlobs = isNetlify ? lazyStore("startup-voice-board") : null;
 
 function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -268,6 +269,76 @@ function schemaResponse() {
 }
 function markdownDossier(session) { return saveDownload(session, "md"); }
 
+const PUBLISHABLE = ["product", "traction", "market", "financing"];
+const CONSENT_VERSION = "draft-2026-11-19";
+const boardIndexKey = "public-index.json";
+const boardFile = (slug) => `public/${slug}.json`;
+function hashKey(value) { return createHash("sha256").update(String(value)).digest("hex"); }
+function keysMatch(given, stored) {
+  if (!given || !stored) return false;
+  const a = Buffer.from(hashKey(given), "hex");
+  const b = Buffer.from(String(stored), "hex");
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+async function boardRead(key) {
+  return isNetlify ? boardBlobs.get(key, { type: "json", consistency: "strong" }) : localRead(resolve(localRoot, key));
+}
+async function boardWrite(key, value) {
+  if (isNetlify) await boardBlobs.setJSON(key, value);
+  else await localWrite(resolve(localRoot, key), value);
+}
+async function boardIndex() { return (await boardRead(boardIndexKey)) || {}; }
+async function boardBySession(sessionId) {
+  const slug = (await boardIndex())[sessionId];
+  return slug ? boardRead(boardFile(slug)) : null;
+}
+function sectionText(session, slot) {
+  const obj = session.objects?.[slot];
+  if (!obj) return "";
+  return fields[slot].filter((f) => String(obj.fields?.[f] || "").trim()).map((f) => `${fieldLabels[f]}: ${obj.fields[f].trim()}`).join("\n");
+}
+function cleanPublication(title, sections) {
+  const cleanTitle = String(title || "").replace(/\s+/g, " ").trim();
+  if (!cleanTitle) throw Object.assign(new Error("A title is required."), { status: 422 });
+  if (cleanTitle.length > 80) throw Object.assign(new Error("The title is too long (max 80 characters)."), { status: 422 });
+  if (!sections || typeof sections !== "object") throw Object.assign(new Error("Sections must be a mapping."), { status: 422 });
+  const clean = {};
+  let total = 0;
+  for (const key of PUBLISHABLE) {
+    if (!(key in sections)) continue;
+    if (typeof sections[key] !== "string") throw Object.assign(new Error(`Section ${key} must be text.`), { status: 422 });
+    const text = sections[key].trim();
+    if (!text) continue;
+    if (text.length > 3000) throw Object.assign(new Error(`Section ${key} is too long (max 3000 characters).`), { status: 422 });
+    total += text.length;
+    clean[key] = text;
+  }
+  for (const key of Object.keys(sections)) {
+    if (key === "team") throw Object.assign(new Error("The team section is never published."), { status: 422 });
+    if (!PUBLISHABLE.includes(key)) throw Object.assign(new Error(`Unknown section: ${String(key).slice(0, 40)}`), { status: 422 });
+  }
+  if (!Object.keys(clean).length) throw Object.assign(new Error("Select at least one section with text."), { status: 422 });
+  if (total > 10000) throw Object.assign(new Error("Too much text."), { status: 422 });
+  return { cleanTitle, clean };
+}
+function excerptOf(sections) {
+  for (const key of PUBLISHABLE) {
+    const text = sections[key];
+    if (!text) continue;
+    const flat = text.replace(/\s+/g, " ").trim();
+    return flat.length <= 160 ? flat : `${flat.slice(0, 159).trimEnd()}…`;
+  }
+  return "";
+}
+async function listedBoard() {
+  const index = await boardIndex();
+  const records = (await Promise.all(Object.values(index).map((slug) => boardRead(boardFile(slug))))).filter(Boolean);
+  return records.filter((r) => r.listed && !r.unpublished_at).map((r) => ({
+    slug: r.slug, title: r.title, excerpt: excerptOf(r.sections || {}),
+    sections: PUBLISHABLE.filter((k) => r.sections?.[k]), published_at: r.published_at,
+  })).sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)));
+}
+
 export default async function handler(request) {
   const url = new URL(request.url), path = normPath(url.pathname), method = request.method.toUpperCase();
   try {
@@ -367,6 +438,60 @@ export default async function handler(request) {
       const notes = slots.flatMap((slot) => { const lines = fields[slot].filter((f) => s.objects[slot].fields[f]).map((f) => `${fieldLabels[f]}: ${s.objects[slot].fields[f]}`); return lines.length ? [{ key: slot, body: lines.join("\n") }] : []; });
       const content = JSON.stringify({ fields: fieldsOut, notes }); let hash = 0; for (const c of content) hash = ((hash << 5) - hash + c.charCodeAt(0)) | 0;
       return json({ session_id: s.id, revision: Math.abs(hash).toString(16), fields: fieldsOut, notes });
+    }
+    if (path === "/api/public/board" && method === "GET") {
+      return json({ items: await listedBoard(), cta_url: process.env.IDO_APP_URL || "https://idoapp.eu" });
+    }
+    m = path.match(/^\/api\/public\/([0-9a-f]{16})$/);
+    if (m && method === "GET") {
+      const rec = await boardRead(boardFile(m[1]));
+      if (!rec || rec.unpublished_at) return error("Not found", 404);
+      return json({ slug: rec.slug, title: rec.title, sections: rec.sections, published_at: rec.published_at, cta_url: process.env.IDO_APP_URL || "https://idoapp.eu" });
+    }
+    m = path.match(/^\/api\/public\/([0-9a-f]{16})\/withdraw$/);
+    if (m && method === "POST") {
+      const rec = await boardRead(boardFile(m[1]));
+      if (!rec) return error("Not found", 404);
+      const body = await request.json().catch(() => ({}));
+      if (!keysMatch(body.owner_key, rec.owner_key_hash)) return error("Wrong owner key.", 403);
+      rec.title = ""; rec.sections = {}; rec.listed = false; rec.email = null; rec.unpublished_at = new Date().toISOString();
+      await boardWrite(boardFile(rec.slug), rec);
+      return json({ ok: true });
+    }
+    m = path.match(/^\/api\/sessions\/([^/]+)\/publish-preview$/);
+    if (m && method === "GET") {
+      const session = await loadSession(m[1]);
+      const sections = Object.fromEntries(PUBLISHABLE.map((slot) => [slot, sectionText(session, slot)]).filter(([, body]) => body));
+      const rec = await boardBySession(m[1]);
+      const existing = rec ? { slug: rec.slug, published: !rec.unpublished_at, listed: Boolean(rec.listed), title: rec.title || "" } : null;
+      return json({ sections, existing, consent_version: CONSENT_VERSION });
+    }
+    m = path.match(/^\/api\/sessions\/([^/]+)\/publish$/);
+    if (m && method === "POST") {
+      await loadSession(m[1]);
+      const body = await request.json().catch(() => ({}));
+      if (!body.consent) return error("Consent to publish is required.", 422);
+      if (body.listed && !body.listing_consent) return error("Consent to being listed on the board is required.", 422);
+      if (!body.consent_version || String(body.consent_version).length > 64) return error("A consent version is required.", 422);
+      const email = String(body.email || "").trim();
+      if (email && !body.email_consent) return error("Consent to store the e-mail address is required.", 422);
+      if (email && !/^[^@\s]{1,64}@[^@\s]{1,189}\.[^@\s]{2,24}$/.test(email)) return error("That e-mail address does not look valid.", 422);
+      const { cleanTitle, clean } = cleanPublication(body.title, body.sections || {});
+      const now = new Date().toISOString();
+      const index = await boardIndex();
+      const existing = index[m[1]] ? await boardRead(boardFile(index[m[1]])) : null;
+      if (existing && !existing.unpublished_at) {
+        if (!keysMatch(body.owner_key, existing.owner_key_hash)) return error("The owner key is required to update this publication.", 403);
+        Object.assign(existing, { title: cleanTitle, sections: clean, listed: Boolean(body.listed), consent_version: body.consent_version, consent_at: now, published_at: now, unpublished_at: null, email: body.email_consent ? email || null : null });
+        await boardWrite(boardFile(existing.slug), existing);
+        return json({ slug: existing.slug, path: `/d/${existing.slug}`, owner_key: null });
+      }
+      const slug = randomBytes(8).toString("hex");
+      const ownerKey = `ik_${randomBytes(18).toString("base64url")}`;
+      await boardWrite(boardFile(slug), { slug, session_id: m[1], title: cleanTitle, sections: clean, listed: Boolean(body.listed), consent_version: body.consent_version, consent_at: now, published_at: now, unpublished_at: null, owner_key_hash: hashKey(ownerKey), email: body.email_consent ? email || null : null });
+      index[m[1]] = slug;
+      await boardWrite(boardIndexKey, index);
+      return json({ slug, path: `/d/${slug}`, owner_key: ownerKey });
     }
     if (path === "/api/debug/data-dir" && method === "GET") return json({ data_dir: "Netlify Blobs (Frankfurt)", sessions: (await listSessions()).length, default: "Netlify Blobs" });
     return error("Not found", 404);

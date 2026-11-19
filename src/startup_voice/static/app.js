@@ -471,6 +471,7 @@ void idoBridge.start();
 settings.paint();
 settings.bind();
 sessions.bind();
+document.getElementById("logoHome")?.addEventListener("click", () => sessions.goPicker({ force: true }));
 chat.bind({ onEndClose: () => dossierActions.endAndClose() });
 configEditor.bind();
 dossierActions.bind();

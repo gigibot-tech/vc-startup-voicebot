@@ -22,11 +22,21 @@ export function createHomeBoard({ api, getLanguage }) {
     return n;
   };
 
-  function paint(items) {
+  const emptyCopy = () => (lang() === "en"
+    ? "Nothing published yet. You can publish your dossier later with “Share publicly…”."
+    : "Noch nichts veröffentlicht. Du kannst dein Dossier später unter „Öffentlich teilen…“ veröffentlichen.");
+
+  function paint(items, { error = false } = {}) {
     const list = $("homeBoardList");
     if (!list) return;
     list.replaceChildren();
-    $("homeBoardEmpty").hidden = items.length > 0;
+    const empty = $("homeBoardEmpty");
+    if (empty) {
+      empty.hidden = !error && items.length > 0;
+      empty.textContent = error
+        ? (lang() === "en" ? "Idea Board unavailable right now." : "Idea Board gerade nicht erreichbar.")
+        : emptyCopy();
+    }
     for (const item of items.slice(0, MAX_SHOWN)) {
       const a = el("a", "hb-card");
       a.href = `/d/${encodeURIComponent(item.slug)}`;
@@ -50,9 +60,10 @@ export function createHomeBoard({ api, getLanguage }) {
       loadedAt = Date.now();
       try {
         paint((await api("/api/public/board"))?.items || []);
-      } catch {
+      } catch (err) {
         loadedAt = 0; // try again next time
-        paint([]);
+        paint([], { error: true });
+        console.warn("home board refresh failed", err);
       }
     },
   };
