@@ -23,6 +23,7 @@ import { createLiveKitVoice } from "./features/voice/voice-livekit.js";
 import { createVoiceSwitch } from "./features/voice/voice-mode.js";
 import { createMicListener, resampleTo16k } from "./features/voice/browser-listen.js";
 import { createCues } from "./features/voice/cues.js";
+import { createIdoBridge } from "./features/ido/ido-bridge.js";
 import { prefs, savePrefs } from "./features/prefs/prefs.js";
 import { createSettings } from "./features/prefs/settings.js";
 import { createSessions, readUrlSessionId, syncUrl } from "./features/sessions/lifecycle.js";
@@ -365,9 +366,17 @@ function renderView() {
   paintProcessBanner();
 }
 
+/** Only does anything when this page runs inside ido-core's iframe (see features/ido). */
+const idoBridge = createIdoBridge({
+  api,
+  getSessionId: activeId,
+  onNotice: (text) => voice.setStatus(text),
+});
+
 subscribe(() => {
   syncUrl();
   renderView();
+  idoBridge.onStateChange();
   voice.onSessionChange(); // a live call belongs to ONE session: end it when the session changes
 });
 
@@ -428,6 +437,7 @@ async function boot() {
   }
 }
 
+void idoBridge.start();
 settings.paint();
 settings.bind();
 sessions.bind();
