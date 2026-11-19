@@ -595,6 +595,7 @@ export function createVoice({
     speakJoined = "";
     speakQueue = [];
     speakPumping = false;
+    localTtsCache.clear();
     stopLocalTtsPlayback();
     try { window.speechSynthesis?.cancel(); } catch { /* ignore */ }
     if (!audioEl) return;
@@ -679,17 +680,35 @@ export function createVoice({
     });
   }
 
+  /** text -> {gen, p}: sentences are synthesized AHEAD of playback, so sentence 2 is ready when 1 ends. */
+  const localTtsCache = new Map();
+
+  function synthesizeLocal(text) {
+    return import("../../shared/model-manager.js").then(async ({ modelManager }) => {
+      const lang = getLanguage();
+      await modelManager.setTtsLanguage(lang);
+      await modelManager.ensureLoaded("tts");
+      return modelManager.synthesize(text, lang);
+    });
+  }
+
+  function prefetchLocalTts(text) {
+    if (resolveTtsProvider() !== "local" || cloudTtsDown || localTtsCache.has(text)) return;
+    const p = synthesizeLocal(text);
+    p.catch(() => { /* surfaces where it is played */ });
+    localTtsCache.set(text, { gen: speakGen, p });
+  }
+
   async function playLocalTts(text, gen) {
     const { modelManager } = await import("../../shared/model-manager.js");
-    const lang = getLanguage();
     const st = modelManager.getState("tts");
     if (st?.state !== "ready" && st?.state !== "running") {
       setStatus("Loading TTS…");
     }
-    await modelManager.setTtsLanguage(lang);
-    await modelManager.ensureLoaded("tts");
+    const hit = localTtsCache.get(text);
+    localTtsCache.delete(text);
+    const result = await (hit && hit.gen === gen ? hit.p : synthesizeLocal(text));
     if (gen !== speakGen) return;
-    const result = await modelManager.synthesize(text, lang);
     if (gen !== speakGen) return;
     const audio = result?.audio;
     const rate = result?.sampling_rate || 16000;
@@ -817,6 +836,7 @@ export function createVoice({
     if (!t) return;
     speakJoined = speakJoined ? `${speakJoined} ${t}` : t;
     speakQueue.push(t);
+    prefetchLocalTts(t);
     void pumpSpeakQueue();
   }
 

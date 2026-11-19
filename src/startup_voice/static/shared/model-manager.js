@@ -12,8 +12,8 @@ const LLM_LABELS = {
 };
 
 const TTS_LABELS = {
-  de: "MMS TTS Deutsch · ~36MB",
-  en: "MMS TTS English · ~36MB",
+  de: "MMS TTS Deutsch · WebGPU",
+  en: "MMS TTS English · WebGPU",
 };
 
 const SLOT_META = {
@@ -316,7 +316,16 @@ function createModelManager() {
    * @param {string} [language]
    * @returns {Promise<{audio: Float32Array, sampling_rate: number}>}
    */
+  // One sentence at a time into the worker (prefetching queues several; they must not overlap).
+  let ttsChain = Promise.resolve();
+
   async function synthesize(text, language = "de") {
+    const run = ttsChain.then(() => synthesizeNow(text, language));
+    ttsChain = run.catch(() => {});
+    return run;
+  }
+
+  async function synthesizeNow(text, language) {
     await setTtsLanguage(language);
     await ensureLoaded("tts");
     const msg = await call({

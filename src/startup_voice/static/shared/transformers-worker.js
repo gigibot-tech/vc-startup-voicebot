@@ -41,16 +41,20 @@ const TTS_MODELS = {
   de: {
     task: "text-to-speech",
     modelId: "Xenova/mms-tts-deu",
-    dtype: "q8",
-    device: "wasm",
-    label: "MMS TTS Deutsch · ~36MB",
+    // WebGPU speaks ~12x faster than real time once warm (WASM q8 was 2.5x SLOWER than real time:
+    // sentence 2 arrived seconds after sentence 1 ended, which sounded like "stops after one sentence").
+    dtype: "fp32",
+    device: "webgpu",
+    fallback: { dtype: "q8", device: "wasm" }, // no WebGPU / it failed
+    label: "MMS TTS Deutsch · WebGPU",
   },
   en: {
     task: "text-to-speech",
     modelId: "Xenova/mms-tts-eng",
-    dtype: "q8",
-    device: "wasm",
-    label: "MMS TTS English · ~36MB",
+    dtype: "fp32",
+    device: "webgpu",
+    fallback: { dtype: "q8", device: "wasm" },
+    label: "MMS TTS English · WebGPU",
   },
 };
 
@@ -224,9 +228,13 @@ async function loadSlot(slot, { id, modelKey } = {}) {
   }
   loadAbort = new AbortController();
   const signal = loadAbort.signal;
-  const cfg = SLOTS[slot];
+  let cfg = SLOTS[slot];
+  if (cfg.fallback && cfg.device === "webgpu" && !(typeof navigator !== "undefined" && navigator.gpu)) {
+    cfg = { ...cfg, ...cfg.fallback, fallback: null };
+    SLOTS[slot] = cfg;
+  }
   setState(slot, "checking_cache");
-  const device = cfg.device || (await pickDevice());
+  let device = cfg.device || (await pickDevice());
   const alreadyCached = knownCached[slot] || (await isModelInBrowserCache(cfg.modelId));
   knownCached[slot] = alreadyCached;
 
@@ -277,11 +285,21 @@ async function loadSlot(slot, { id, modelKey } = {}) {
     } else if (alreadyCached) {
       setState(slot, "warming_up", { device, progress: 100 });
     }
-    const pipe = await pipeline(cfg.task, cfg.modelId, {
-      dtype: cfg.dtype,
-      device,
-      progress_callback,
-    });
+    let pipe;
+    try {
+      pipe = await pipeline(cfg.task, cfg.modelId, { dtype: cfg.dtype, device, progress_callback });
+      // First WebGPU run compiles shaders (seconds): do it now, while the card says "warming up",
+      // so the first spoken sentence is not delayed.
+      if (slot === "tts" && device === "webgpu") await pipe("Hallo.");
+    } catch (err) {
+      if (!(cfg.fallback && device === "webgpu") || signal.aborted) throw err;
+      try { await pipe?.dispose?.(); } catch { /* ignore */ }
+      cfg = { ...cfg, ...cfg.fallback, fallback: null };
+      SLOTS[slot] = cfg;
+      device = cfg.device;
+      setState(slot, "downloading", { device, progress: 0 });
+      pipe = await pipeline(cfg.task, cfg.modelId, { dtype: cfg.dtype, device, progress_callback });
+    }
     if (signal.aborted) {
       try { await pipe.dispose?.(); } catch { /* ignore */ }
       pipes[slot] = null;
