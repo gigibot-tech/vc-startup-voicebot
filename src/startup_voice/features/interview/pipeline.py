@@ -67,6 +67,7 @@ from startup_voice.features.interview.prompts import (
     build_extract_user,
     build_reply_prompt,
     build_score_belege_user,
+    end_allowed,
     field_hint,
     is_repeat,
     previous_assistant_message,
@@ -387,6 +388,7 @@ class InterviewPipeline:
     ) -> tuple[InterviewSession, str, bool]:
         """Persist the spoken reply right after Call #1 (before browser Call #2 extract runs)."""
         reply, _mark_extract, offer_end = split_reply_marks(raw_reply)
+        offer_end = offer_end and end_allowed(session)  # a small model's [[intake:end]] may be premature
         if not reply:
             raise RuntimeError("LLM returned empty reply")
         if session.evaluation and session.evaluation.ready_for_closing:
@@ -397,7 +399,9 @@ class InterviewPipeline:
             and session.messages[-1].content == reply
         ):
             return session, reply, offer_end
-        reply = self._guard_repeat(session, reply, previous=previous_assistant_message(session))
+        reply = self._guard_repeat(
+            session, reply, previous=previous_assistant_message(session), offer_end=offer_end
+        )
         session.messages.append(TurnMessage(role="assistant", content=reply))
         self._store.save(session)
         return session, reply, offer_end
@@ -435,9 +439,12 @@ class InterviewPipeline:
         ask = (session.evaluation.next_focus_slot if session.evaluation else None) or focus
         raw_reply = self._run_reply(session, user_text, ask)
         reply, _mark_extract, offer_end = split_reply_marks(raw_reply)
+        offer_end = offer_end and end_allowed(session)  # a small model's [[intake:end]] may be premature
         if not reply:
             raise RuntimeError("LLM returned empty reply")
-        reply = self._guard_repeat(session, reply, previous=previous_assistant_message(session))
+        reply = self._guard_repeat(
+            session, reply, previous=previous_assistant_message(session), offer_end=offer_end
+        )
         if session.evaluation and session.evaluation.ready_for_closing:
             offer_end = True
         session.messages.append(
@@ -484,9 +491,12 @@ class InterviewPipeline:
                 yield chunk
         raw_reply = "".join(parts).strip()
         reply, _mark_extract, offer_end = split_reply_marks(raw_reply)
+        offer_end = offer_end and end_allowed(session)  # a small model's [[intake:end]] may be premature
         if not reply:
             raise RuntimeError("LLM returned empty reply")
-        reply = self._guard_repeat(session, reply, previous=previous_assistant_message(session))
+        reply = self._guard_repeat(
+            session, reply, previous=previous_assistant_message(session), offer_end=offer_end
+        )
         if session.evaluation and session.evaluation.ready_for_closing:
             offer_end = True
         session.messages.append(
@@ -592,7 +602,9 @@ class InterviewPipeline:
         )
         return touched, refresh_evaluation(session)
 
-    def _guard_repeat(self, session: InterviewSession, reply: str, *, previous: str) -> str:
+    def _guard_repeat(
+        self, session: InterviewSession, reply: str, *, previous: str, offer_end: bool = False
+    ) -> str:
         """Never say the previous assistant message again.
 
         Small models (Granite 4 3B) copy earlier assistant text from the prompt — once the
@@ -600,11 +612,15 @@ class InterviewPipeline:
         ``reply`` is ≥80 % the same as ``previous``, swap in the catalog question for the
         slot this turn was meant to ask (``last_asked_fields[0]``).
         """
-        if not is_repeat(reply, previous):
-            return reply
         asked = session.last_asked_fields or []
         slot = asked[0].split(".", 1)[0] if asked else (session.evaluation.next_focus_slot or "team")
         fallback = self.config().question_for(slot)  # type: ignore[arg-type]
+        # No question at all although fields are still open (and this is not a wrap-up): a small
+        # model chatted or only acknowledged. Ask the catalog question instead of leaving a dead end.
+        if "?" not in reply and not offer_end and not end_allowed(session):
+            return fallback
+        if not is_repeat(reply, previous):
+            return reply
         return fallback if not is_repeat(fallback, previous) else reply
 
     def _session_followup_mode(self, session: InterviewSession) -> str:

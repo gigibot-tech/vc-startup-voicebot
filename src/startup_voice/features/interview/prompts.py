@@ -13,7 +13,7 @@ calls in strict sequence (never in parallel, so TTS starts immediately):
   │ • UI state : "Thinking…" bubble -> streams spoken question -> TTS plays │
   │ • System   : editable reply_system_prompt                               │
   │              + REPLY_RULES (ask ASK_1 + ASK_2, never repeat last)      │
-  │              + REPLY_END_GATE (optional trailing [[intake:end]])        │
+  │              + wrap-up rule + [[intake:end]] only when nothing is open  │
   │              + language suffix (DE / EN)                                │
   │ • User     : ASK_1 + ASK_2 + BACKUP  (picked in Python, skipping the    │
   │                                     fields asked last turn)             │
@@ -77,37 +77,47 @@ REPLY_DOSSIER_GATE = (
     "conversation. Never say that marker aloud."
 )
 
-# Offer end-of-intake (user chooses Continue vs Finalize in the UI — never auto-finalize).
-REPLY_END_GATE = (
-    "\n\nEND OF INTAKE (optional trailing marker):\n"
-    "- When ready_for_closing is true, OR further questions would only rehash "
-    "already_answered / empty-by-absence gaps with no useful probe left: speak a short "
-    "wrap-up in the session language (e.g. dossier is ready — they can continue asking "
-    "or finalize in the UI), then on its OWN last line write exactly [[intake:end]].\n"
-    "- Do NOT finalize yourself. Do NOT keep drilling filled answers.\n"
-    "- While ASK_1 is set, ask your questions and omit [[intake:end]].\n"
-    "- Never say the marker aloud. Order of trailing lines if both apply: "
-    "[[dossier:yes|no]] then [[intake:end]]."
-)
-
 # Always appended (even when reply_system_prompt is customized in interview_config.json).
 # NOTE: avoid the substring "extract" here — test stubs dispatch on '"extract" in system.lower()'.
+#
+# !! Rules that only apply sometimes (the "last question" wording, the [[intake:end]] marker) are
+# added by reply_rules() ONLY when they apply. Small models (Granite 4 3B, LFM3 1.7B) copy any
+# phrase they see: with both rules always present, LFM3 wrote "Letzte kurze Frage:" every turn and
+# appended "[[dossier:yes]] Then [[intake:end]]." although many fields were open.
 REPLY_RULES = (
     "\n\nYOUR TASK THIS TURN (the dossier is 1 turn behind 'Founder just said'):\n"
-    "1) At most one short clause reacting to 'Founder just said'.\n"
+    "1) At most one short clause reacting to 'Founder just said' — in your own words, do not "
+    "repeat what the founder said.\n"
     "2) Ask ASK_1 and ASK_2 as TWO short questions, one each. If 'Founder just said' already "
     "answers one of them (even roughly, or with 0 / none / noch nicht), ask BACKUP instead.\n"
     "3) Do not ask again about ASKED_LAST_TURN (unless RE_ASK says so) or ALREADY_ANSWERED.\n"
-    "4) Write a NEW reply in your own words. Speak like a person: no lists, no field names, "
-    "no technical keys, never mention other open topics.\n"
-    "5) Only ASK_1 given (ASK_2: none): say it is the last question before the dossier is "
-    "complete ('Letzte kurze Frage:' / 'One last question:') and ask just that one.\n"
-    "6) ASK_1: none, or 'Founder just said' answers the last open field: short wrap-up, "
-    "then [[intake:end]]."
+    "4) Write a NEW reply. Speak like a person: no lists, no field names, no technical keys, "
+    "never mention other open topics, never write square brackets."
+)
+REPLY_LAST_RULE = (
+    "\n5) ASK_2 is none: this is the last open topic. Say it is the last question before the "
+    "dossier is complete ('Letzte kurze Frage:' / 'One last question:') and ask just ASK_1. "
+    "If 'Founder just said' already answers ASK_1, wrap up instead (see below)."
+)
+# End of intake (the user chooses Continue vs Finalize in the UI — never auto-finalize).
+REPLY_WRAPUP_RULE = (
+    "\nWRAP UP: nothing useful is left to ask. Speak a short wrap-up (the dossier is ready — they "
+    "can continue asking or finalize in the UI), then on its OWN last line write exactly "
+    "[[intake:end]]. Never say the marker aloud. Do not finalize yourself."
 )
 
 # Backwards-compatible alias (old name).
 REPLY_NO_REASK = REPLY_RULES
+
+
+def reply_rules(n_asks: int) -> str:
+    """Rules for the reply system prompt; ``n_asks`` = how many topics Python picked (0, 1 or 2)."""
+    if n_asks >= 2:
+        return REPLY_RULES
+    if n_asks == 1:
+        return REPLY_RULES + REPLY_LAST_RULE + REPLY_WRAPUP_RULE
+    return REPLY_RULES + "\n5) ASK_1 is none: every field is filled." + REPLY_WRAPUP_RULE
+
 
 FOLLOWUP_MODE_HINTS: dict[str, str] = {
     "balanced": "accept reasonable answers and keep moving across slots",
@@ -135,33 +145,46 @@ def split_reply_intake_end(raw: str) -> tuple[str, bool]:
     return text[: match.start()].strip(), True
 
 
+_ANY_MARK_RE = re.compile(
+    r"\[\[\s*(?:dossier\s*:\s*(?P<dossier>yes|no)|intake\s*:\s*(?P<end>end))\s*\]\]",
+    re.IGNORECASE,
+)
+# Connector debris a small model leaves between/after markers: "[[dossier:yes]] Then [[intake:end]]."
+_MARK_DEBRIS_RE = re.compile(r"(?:\s*(?:→|->|=>|then|dann|und dann|und)\s*)+[.!]?\s*$", re.IGNORECASE)
+
+
 def split_reply_marks(raw: str) -> tuple[str, bool, bool]:
-    """Strip trailing ``[[dossier:…]]`` / ``[[intake:end]]`` in any order.
+    """Strip every ``[[dossier:…]]`` / ``[[intake:end]]`` marker, wherever the model put it.
 
     Returns ``(spoken_text, needs_extract, offer_end)``.
     Missing dossier mark → needs_extract True (safe default).
+    Markers are removed from the whole text (not only the tail): LFM3 1.7B wrote
+    "…[[dossier:yes]] Then [[intake:end]]." and the old tail-only regex left "Then" behind.
+    ``offer_end`` is only a request — see ``end_allowed``.
     """
     text = (raw or "").strip()
     offer_end = False
     needs_extract = True
-    dossier_found = False
-    for _ in range(6):
-        m_end = _END_MARK_RE.search(text)
-        m_dos = _DOSSIER_MARK_RE.search(text)
-        if not m_end and not m_dos:
-            break
-        end_at = m_end.end() if m_end else -1
-        dos_at = m_dos.end() if m_dos else -1
-        if m_end and end_at >= dos_at:
+    for match in _ANY_MARK_RE.finditer(text):
+        if match.group("end"):
             offer_end = True
-            text = text[: m_end.start()].strip()
-        elif m_dos:
-            needs_extract = m_dos.group(1).lower() == "yes"
-            dossier_found = True
-            text = text[: m_dos.start()].strip()
-    if not dossier_found:
-        needs_extract = True
-    return strip_field_leaks(text), needs_extract, offer_end
+        else:
+            needs_extract = match.group("dossier").lower() == "yes"
+    text = _ANY_MARK_RE.sub("", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = _MARK_DEBRIS_RE.sub("", text.strip()).strip()
+    return tidy_reply(strip_field_leaks(text)) or strip_field_leaks(text), needs_extract, offer_end
+
+
+def end_allowed(session: InterviewSession) -> bool:
+    """May the reply offer "end of intake"? Only when nothing is open except what was just asked.
+
+    The dossier is one turn behind, so the last asked fields may still look open; anything
+    else open means the model's ``[[intake:end]]`` is premature and is ignored.
+    """
+    open_keys = set(open_field_keys(session))
+    return not open_keys or open_keys <= set(session.last_asked_fields or [])
+
 
 # ---------------------------------------------------------------------------
 # 1) CALL #2: EXTRACT — structured facts out of free speech (must be valid JSON)
@@ -285,7 +308,7 @@ DEFAULT_REPLY_SYSTEM = (
     "- Spoken German, ≤2 sentences, no markdown, no essay or yes/no-only questions.\n"
     "- Accept nein / 0 / keine as a valid answer and move on.\n"
     "- When nothing useful is left open: short wrap-up that the dossier is ready for review "
-    "(they choose Continue or Finalize in the UI), then [[intake:end]]. Never finalize yourself."
+    "(they choose Continue or Finalize in the UI). Never finalize yourself."
 )
 
 DEFAULT_GREETING = (
@@ -447,6 +470,11 @@ def field_hint(key: str) -> str:
 _FIELD_KEY_RE = re.compile(
     r"\b(?:team|product|traction|market|financing)\.[a-z]+(?:_[a-z]+)*\b", re.IGNORECASE
 )
+# Labels of OUR prompt that a small model sometimes echoes ("- ASK_1: team & background").
+_PROMPT_LABEL_RE = re.compile(
+    r"\b(?:ASK_[12]|BACKUP|ALREADY_ANSWERED|ASKED_LAST_TURN|RE_ASK|OPEN_FIELDS_LEFT|FOLLOWUP_MODE)\b"
+    r"|Founder just said",
+)
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…:])\s+")
 
 
@@ -463,17 +491,46 @@ def strip_field_leaks(text: str) -> str:
     "…geben: Diese Felder…" behind (seen with Granite 4 3B). Returns the original text if
     nothing would be left. Netlify twin: ``stripFieldLeaks`` in api.mjs.
     """
-    if not text or not _FIELD_KEY_RE.search(text):
+    if not text or not (_FIELD_KEY_RE.search(text) or _PROMPT_LABEL_RE.search(text)):
         return text
     sentences = _SENTENCE_SPLIT_RE.split(" ".join(text.split()))
     kept: list[str] = []
     for sent in sentences:
-        if _FIELD_KEY_RE.search(sent) or sent.lstrip().startswith(("-", "*", "•")):
+        if (
+            _FIELD_KEY_RE.search(sent)
+            or _PROMPT_LABEL_RE.search(sent)
+            or sent.lstrip().startswith(("-", "*", "•", "(Note"))
+        ):
             break
         kept.append(sent)
     while kept and kept[-1].rstrip().endswith(":"):
         kept.pop()  # list intro whose list we just cut
     return " ".join(kept).strip() or text
+
+
+_LIST_MARK_RE = re.compile(r"(?m)^\s*(?:\d+[.)]|[-*•])\s+")
+
+
+def tidy_reply(text: str, *, max_questions: int = 2, max_lead: int = 1) -> str:
+    """Bring a small model's reply into the shape the prompt asked for.
+
+    Spoken reply = at most ``max_lead`` lead-in sentence(s) + at most ``max_questions`` questions.
+    Seen with LFM3 1.7B / Granite 3B: numbered lists ("1) … 2) …"), three or four questions, and
+    claims AFTER the question ("ich habe das im Dossier aufgenommen"). List markers are dropped,
+    everything after the last allowed question is cut, and surplus questions are dropped.
+    A reply without any question (wrap-up) is only de-listed and capped at three sentences.
+    Netlify twin: ``tidyReply`` in api.mjs.
+    """
+    flat = " ".join(_LIST_MARK_RE.sub("", text or "").split())
+    if not flat:
+        return ""
+    sentences = [x for x in _SENTENCE_SPLIT_RE.split(flat) if x]
+    first_q = next((i for i, x in enumerate(sentences) if x.rstrip().endswith("?")), None)
+    if first_q is None:
+        return " ".join(sentences[:3])
+    lead = [x for x in sentences[:first_q] if not x.rstrip().endswith(":")][-max_lead:] if max_lead else []
+    questions = [x for x in sentences[first_q:] if x.rstrip().endswith("?")][:max_questions]
+    return " ".join(lead + questions)
 
 
 def is_repeat(reply: str, previous: str, *, threshold: float = 0.8) -> bool:
@@ -736,8 +793,7 @@ def build_reply_prompt(
     )
     system = (
         (reply_system_prompt or "").rstrip()
-        + REPLY_RULES
-        + REPLY_END_GATE
+        + reply_rules(len(asks))
         + reply_prompt_suffix(session.language)
     )
     return system, user

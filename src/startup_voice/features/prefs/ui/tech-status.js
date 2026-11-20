@@ -7,7 +7,7 @@
 const pick = (lang, de, en) => (String(lang || "de").toLowerCase().startsWith("en") ? en : de);
 const pct = (n) => `${Math.max(0, Math.min(100, Math.round(Number(n) || 0)))} %`;
 
-export const isBrowserLlm = (llm) => llm === "granite-3b" || llm === "gemma-3n-e2b" || llm === "transformers";
+export const isBrowserLlm = (llm) => llm === "lfm3-1.7b" || llm === "granite-3b" || llm === "gemma-3n-e2b" || llm === "transformers";
 
 /** Line under the reply-model dropdown. */
 export function describeLlm({ llm, state = "unloaded", progress = 0, lang = "de" }) {

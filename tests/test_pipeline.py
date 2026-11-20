@@ -399,14 +399,14 @@ def test_stream_turn_always_extracts_after_reply(tmp_path: Path):
 
     class NoDossierStream(StubExtractLLM):
         def stream(self, system: str, user: str, *, max_tokens: int | None = None):
-            yield from ["Alles klar. ", "Weiter.\n[[dossier:no]]"]
+            yield from ["Alles klar. ", "Wer gründet mit?\n[[dossier:no]]"]
 
     pipe = InterviewPipeline(NoDossierStream(), FileSessionStore(tmp_path))
     session, _ = pipe.start_session()
     items = list(pipe.stream_turn(session, "ok"))
     done = next(i for i in items if isinstance(i, ReplyDone))
     assert done.needs_extract is True
-    assert done.reply == "Alles klar. Weiter."
+    assert done.reply == "Alles klar. Wer gründet mit?"
     assert EXTRACT_PHASE in items
     # Order: reply chunks → ReplyDone → EXTRACT_PHASE
     done_i = next(i for i, x in enumerate(items) if isinstance(x, ReplyDone))

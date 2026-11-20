@@ -725,3 +725,97 @@ def test_repeat_guard_swaps_in_catalog_question(tmp_path: Path):
     assert second != first
     slot = session.last_asked_fields[0].split(".")[0]
     assert second == pipe.config().question_for(slot)
+
+
+def test_split_reply_marks_strips_markers_anywhere_and_connector_debris():
+    """LFM3 1.7B wrote '…[[dossier:yes]] Then [[intake:end]].' and '[[dossier:yes]] →'."""
+    from startup_voice.features.interview.prompts import split_reply_marks
+
+    spoken, needs, end = split_reply_marks(
+        "Wer gründet mit?\n\n[[dossier:yes]] Then [[intake:end]]."
+    )
+    assert spoken == "Wer gründet mit?" and needs is True and end is True
+    spoken, needs, end = split_reply_marks("Wie weit ist das Produkt?\n\n[[dossier:no]] →")
+    assert spoken == "Wie weit ist das Produkt?" and needs is False and end is False
+    spoken, _, _ = split_reply_marks("Hallo [[dossier:yes]] wer seid ihr?")
+    assert spoken == "Hallo wer seid ihr?"
+
+
+def test_premature_intake_end_is_ignored_until_nothing_is_open():
+    from startup_voice.features.interview.prompts import end_allowed
+
+    session = InterviewSession.create(language="de")
+    assert end_allowed(session) is False  # everything open
+    for slot in DIMENSIONS_SPEC:
+        for field in DIMENSIONS_SPEC[slot].required_fields:
+            session.objects[slot].fields[field] = "filled"
+    session.objects["financing"].fields["runway_milestones"] = ""
+    assert end_allowed(session) is False  # one open field, not asked last turn
+    session.last_asked_fields = ["financing.runway_milestones"]
+    assert end_allowed(session) is True  # founder is answering the last open field now
+
+
+def test_last_question_and_wrapup_wording_only_when_they_apply():
+    """With two topics the prompt must not contain 'Letzte kurze Frage' or the end marker."""
+    from startup_voice.features.interview.prompts import reply_rules
+
+    two = reply_rules(2)
+    assert "Letzte kurze Frage" not in two and "[[intake:end]]" not in two
+    one = reply_rules(1)
+    assert "Letzte kurze Frage" in one and "[[intake:end]]" in one
+    assert "[[intake:end]]" in reply_rules(0)
+
+
+def test_strip_field_leaks_also_cuts_echoed_prompt_labels():
+    """LFM3 1.7B once appended '- ASK_1: team & background … (Note: Founder just said …)'."""
+    from startup_voice.features.interview.prompts import strip_field_leaks
+
+    raw = (
+        "Was ist dein Hintergrund? Und wie lange bis zum nächsten Meilenstein?\n\n"
+        "- ASK_1: team & background\n- ASK_2: runway\n\n"
+        "(Note: Founder just said identifies who the founders are.)"
+    )
+    assert strip_field_leaks(raw) == "Was ist dein Hintergrund? Und wie lange bis zum nächsten Meilenstein?"
+
+
+def test_tidy_reply_fixes_the_shapes_small_models_produce():
+    """Real LFM3 1.7B outputs: numbered list, 4 questions, claims after the question."""
+    from startup_voice.features.interview.prompts import split_reply_marks, tidy_reply
+
+    lfm_list = (
+        "Ach, das ist toll, wir haben zwei Gründer im Team. Du machst Produkt & KI. "
+        "Und was sind deine Zahlen, Revenue oder MRR/Usage?\n\n"
+        "1) Wer sind die beiden Gründer und welche Rolle bei dem Projekt?\n"
+        "2) Welches Zielkundensegment (ICP) zielt ihr an?"
+    )
+    out = tidy_reply(lfm_list)
+    assert out.count("?") == 2
+    assert "1)" not in out and "2)" not in out
+    assert out.startswith("Du machst Produkt & KI.")  # one lead-in sentence, the closest to the questions
+
+    claim = "Wer sind die Gründer? Und wie löst das Produkt das Problem? Gute Nachricht – ich habe alles im Dossier aufgenommen."
+    assert tidy_reply(claim) == "Wer sind die Gründer? Und wie löst das Produkt das Problem?"
+
+    wrapup = "Das Dossier ist bereit. Ihr könnt weiter fragen oder abschließen."
+    assert tidy_reply(wrapup) == wrapup  # no question: only capped, not rewritten
+
+    spoken, _, _ = split_reply_marks("Hallo!\n\n1) Wer gründet mit?\n2) Wie weit ist das Produkt?\n3) Wer sind die Kunden?")
+    assert spoken.count("?") == 2
+
+
+def test_reply_without_any_question_becomes_the_catalog_question(tmp_path: Path):
+    """A model that only acknowledges leaves a dead end while fields are open → catalog question."""
+
+    class ChatOnlyLLM:
+        def complete(self, system, user, *, max_tokens=None, json_mode=False):
+            if "extract" in system.lower() or json_mode:
+                return '{"updates":{},"belege":{}}'
+            return "Das klingt super, danke für die Infos."
+
+    pipe = InterviewPipeline(ChatOnlyLLM(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session(language="de")
+    session = pipe.process_turn(session, "Wir bauen eine App.")
+    reply = session.messages[-1].content
+    assert "?" in reply
+    slot = session.last_asked_fields[0].split(".")[0]
+    assert reply == pipe.config().question_for(slot)

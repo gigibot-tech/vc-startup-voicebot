@@ -6,7 +6,35 @@
  *                cached_idle ↔ ready (Unload RAM / Load into GPU)
  */
 
+/**
+ * Cleanup of models this app no longer offers: Qwen (old experiment, ~GBs that would stay in the browser
+ * cache forever). Runs once at page load on the main thread (not in the worker, which only starts when a
+ * browser model is selected — someone on Ollama would never be cleaned). Only cache entries whose URL
+ * matches LEGACY_MODEL_PATTERNS are deleted. !! Do NOT add a model that is still in LLM_MODELS
+ * (transformers-worker.js) here — Granite 4 3B is an option again and must keep its cache. Best effort.
+ */
+const LEGACY_MODEL_PATTERNS = [/\/qwen/i, /qwen[-_]?\d/i];
+export async function purgeLegacyModels() {
+  if (typeof caches === "undefined") return 0;
+  let removed = 0;
+  try {
+    for (const name of await caches.keys()) {
+      const cache = await caches.open(name);
+      for (const req of await cache.keys()) {
+        const url = String(req.url || "");
+        if (LEGACY_MODEL_PATTERNS.some((re) => re.test(url)) && (await cache.delete(req))) removed += 1;
+      }
+    }
+  } catch {
+    /* cache cleanup is optional */
+  }
+  if (removed) console.info(`[model-manager] removed ${removed} cached files of retired models (Qwen)`);
+  return removed;
+}
+void purgeLegacyModels();
+
 const LLM_LABELS = {
+  "lfm3-1.7b": "LFM3 1.7B · WebGPU · q4f16",
   "granite-3b": "Granite 4 3B · WebGPU · q4f16",
   "gemma-3n-e2b": "Gemma 3n E2B · WebGPU · q4f16",
 };
@@ -18,7 +46,7 @@ const TTS_LABELS = {
 
 const SLOT_META = {
   whisper: { badge: "Whisper Small · WASM · q8", task: "STT" },
-  llm: { badge: LLM_LABELS["granite-3b"], task: "LLM" },
+  llm: { badge: LLM_LABELS["lfm3-1.7b"], task: "LLM" },
   tts: { badge: TTS_LABELS.de, task: "TTS" },
 };
 
@@ -189,11 +217,11 @@ function createModelManager() {
     onProcessBanner = fn;
   }
 
-  let activeLlmKey = "granite-3b";
+  let activeLlmKey = "lfm3-1.7b";
   let activeTtsKey = "de";
 
   async function setLlmModelKey(modelKey) {
-    const key = LLM_LABELS[modelKey] ? modelKey : "granite-3b";
+    const key = LLM_LABELS[modelKey] ? modelKey : "lfm3-1.7b";
     activeLlmKey = key;
     SLOT_META.llm.badge = LLM_LABELS[key];
     slotState.llm.label = LLM_LABELS[key];

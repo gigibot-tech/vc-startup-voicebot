@@ -18,6 +18,19 @@ env.useBrowserCache = true;
 /** @typedef {"whisper"|"llm"|"tts"} SlotKey */
 
 const LLM_MODELS = {
+  // Default browser reply model: Liquid AI LFM3 1.7B (~1 GB at 4-bit, 256K context, instruction/agent
+  // tuned). Needs Transformers.js >= 4.3.2. `thinking: false` turns off its reasoning trace (replies must
+  // be short and spoken); `gen` = extra generation options from the model card (repetition_penalty 1.1).
+  "lfm3-1.7b": {
+    task: "text-generation",
+    modelId: "onnx-community/LFM3-1.7B-ONNX",
+    dtype: "q4f16",
+    device: "webgpu",
+    label: "LFM3 1.7B · WebGPU · q4f16",
+    thinking: false,
+    gen: { repetition_penalty: 1.1 },
+  },
+  // Older option, kept on request: Granite 4 3B (~2 GB, heavier and slower than LFM3).
   "granite-3b": {
     task: "text-generation",
     modelId: "onnx-community/granite-4.0-micro-ONNX-web",
@@ -66,7 +79,7 @@ const SLOTS = {
     device: "wasm",
     label: "Whisper Small · WASM · q8",
   },
-  llm: { ...LLM_MODELS["granite-3b"] },
+  llm: { ...LLM_MODELS["lfm3-1.7b"] },
   tts: { ...TTS_MODELS.de },
 };
 
@@ -155,7 +168,7 @@ async function setTtsModel(modelKey, { id } = {}) {
 }
 
 async function setLlmModel(modelKey, { id } = {}) {
-  const key = LLM_MODELS[modelKey] ? modelKey : "granite-3b";
+  const key = LLM_MODELS[modelKey] ? modelKey : "lfm3-1.7b";
   const nextCfg = LLM_MODELS[key];
   const changed = SLOTS.llm.modelId !== nextCfg.modelId;
   if (changed && pipes.llm) {
@@ -377,6 +390,13 @@ async function generateText({ id, system, user, max_tokens = 256, stream = false
   // Browser 1.5B model: cap max_new_tokens so extract doesn't hang for minutes.
   const cap = stream ? 220 : 900;
   const max_new_tokens = Math.max(32, Math.min(cap, Number(max_tokens) || 200));
+  // Per-model options from LLM_MODELS: extra sampling params and, for reasoning-capable models
+  // (LFM3), `enable_thinking: false` so the spoken reply is not preceded by a thinking trace.
+  const modelCfg = SLOTS.llm || {};
+  const extra = {
+    ...(modelCfg.gen || {}),
+    ...(modelCfg.thinking === false ? { tokenizer_encode_kwargs: { enable_thinking: false } } : {}),
+  };
 
   try {
     let full = "";
@@ -399,6 +419,7 @@ async function generateText({ id, system, user, max_tokens = 256, stream = false
         max_new_tokens,
         do_sample: false,
         return_full_text: false,
+        ...extra,
         ...(streamer ? { streamer } : {}),
       });
       if (!full) {
@@ -410,6 +431,7 @@ async function generateText({ id, system, user, max_tokens = 256, stream = false
         max_new_tokens,
         do_sample: false,
         return_full_text: false,
+        ...extra,
       });
       full = extractGeneratedString(out);
     }

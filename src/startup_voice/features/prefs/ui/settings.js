@@ -141,7 +141,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     if (llmSlot) {
       llmSlot.hidden = !llm;
       if (llm) {
-        const modelKey = prefs.llm === "gemma-3n-e2b" ? "gemma-3n-e2b" : "granite-3b";
+        const modelKey = ["gemma-3n-e2b", "granite-3b"].includes(prefs.llm) ? prefs.llm : "lfm3-1.7b";
         void modelManager.setLlmModelKey(modelKey).catch(() => {});
         if (!llmCard) llmCard = modelManager.createModelCard(llmSlot, "llm");
       } else {
@@ -183,7 +183,7 @@ export function createSettings({ voice, onMetaChange, onLanguageChange }) {
     }
     const llmSel = $("llmSel");
     if (llmSel) {
-      const v = prefs.llm === "transformers" ? "granite-3b" : prefs.llm;
+      const v = prefs.llm === "transformers" ? "lfm3-1.7b" : prefs.llm;
       llmSel.value = [...llmSel.options].some((o) => o.value === v) ? v : "ollama";
     }
     const ar = $("autoResolveMinSel");

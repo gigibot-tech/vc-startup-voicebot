@@ -37,7 +37,7 @@ test("deployed without a server LLM: the reply model moves to the browser one", 
   const doc = fakeDoc([['#llmSel option[value="ollama"]', "Ollama"]]);
   const prefs = { llm: "ollama", lang: "de" };
   assert.equal(applyAvailability({ prefs, health: { llm_provider: "none" }, hostname: "x.netlify.app", doc }), true);
-  assert.equal(prefs.llm, "granite-3b");
+  assert.equal(prefs.llm, "lfm3-1.7b");
 });
 
 test("deployed + Ollama: the option is disabled and the reply model moves to the browser one", () => {
@@ -45,7 +45,7 @@ test("deployed + Ollama: the option is disabled and the reply model moves to the
   const prefs = { llm: "ollama", lang: "de" };
   const changed = applyAvailability({ prefs, health: { llm_provider: "ollama" }, hostname: "x.netlify.app", doc });
   assert.equal(changed, true);
-  assert.equal(prefs.llm, "granite-3b");
+  assert.equal(prefs.llm, "lfm3-1.7b");
   assert.equal(doc.opts['#llmSel option[value="ollama"]'].disabled, true);
 });
 
@@ -58,7 +58,7 @@ test("local dev keeps Ollama selected", () => {
 
 test("cloud speech options that the server does not offer are disabled", () => {
   const doc = fakeDoc([['#sttSel option[value="elevenlabs"]', "ElevenLabs"], ['#sttSel option[value="deepgram"]', "Deepgram"]]);
-  applyAvailability({ prefs: { llm: "granite-3b", lang: "de" }, health: { stt_providers: ["deepgram", "browser"] }, hostname: "localhost", doc });
+  applyAvailability({ prefs: { llm: "lfm3-1.7b", lang: "de" }, health: { stt_providers: ["deepgram", "browser"] }, hostname: "localhost", doc });
   assert.equal(doc.opts['#sttSel option[value="elevenlabs"]'].disabled, true);
   assert.match(doc.opts['#sttSel option[value="elevenlabs"]'].textContent, /nicht verfügbar/);
   assert.equal(doc.opts['#sttSel option[value="deepgram"]'].disabled, false);

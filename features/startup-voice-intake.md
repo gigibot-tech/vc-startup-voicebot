@@ -42,12 +42,13 @@ Two drivers behind one `voice` object (`voice/ui/voice-mode.js`): **classic** an
 Settings (`#prefsBar`):
 - **STT** `#sttSel`: `elevenlabs` | `whisper` | `deepgram` | `browser`
 - **TTS** `#ttsSel`: `local` (default, downloadable MMS DE/EN via Transformers.js) | `browser` (Web Speech) | `elevenlabs`
-- **LLM** `#llmSel`: `ollama` (server, default) | `granite-3b` (Granite 4 3B WebGPU) | `gemma-3n-e2b` (Gemma 3n E2B Nano Mobile WebGPU)
+- **LLM** `#llmSel`: `ollama` (server, default) | `lfm3-1.7b` (Liquid AI LFM3 1.7B WebGPU, ~1.1 GB, default browser model) | `granite-3b` (Granite 4 3B WebGPU, ~2 GB) | `gemma-3n-e2b` (Gemma 3n E2B Nano Mobile WebGPU)
 
-When `llm` is `granite-3b` or `gemma-3n-e2b`, chat uses the same loaded `text-generation` pipeline for Call #1 (spoken reply) and Call #2 (5-slot JSON extract):
+When `llm` is `lfm3-1.7b`, `granite-3b` or `gemma-3n-e2b`, chat uses the same loaded `text-generation` pipeline for Call #1 (spoken reply) and Call #2 (5-slot JSON extract):
 
 1. `POST /api/sessions/{id}/turn/prepare` → `{reply_system, reply_user, extract_system, extract_user, …}`
-2. Worker runs reply (streamed) then extract on `onnx-community/granite-4.0-micro-ONNX-web` (`q4f16`) or `onnx-community/gemma-3n-E2B-it-ONNX` (`q4f16`)
+2. Worker runs reply (streamed) then extract on `onnx-community/LFM3-1.7B-ONNX` (`q4f16`, thinking off, `repetition_penalty` 1.1) (`onnx-community/granite-4.0-micro-ONNX-web` for Granite) or `onnx-community/gemma-3n-E2B-it-ONNX` (`q4f16`)
+   Retired models (Qwen) are deleted from the browser cache at page load (`purgeLegacyModels` in `static/shared/model-manager.js`; never list a model that is still in `LLM_MODELS`); a stored pref `transformers` migrates to `lfm3-1.7b`.
 3. `POST /api/sessions/{id}/turn/reply` saves Call #1 immediately; `POST /api/sessions/{id}/turn/commit` `{raw_reply, raw_extract}` runs the dossier review/score gate
 4. **Speaking during dossier update:** Clicking `Sprechen` while Call #2 (`Updating dossier…`) is still running starts recording immediately without aborting the background extract; if the new utterance is submitted before Call #2 finishes, `sendText()` awaits `inFlightExtractPromise` so the new reply always uses the freshly updated dossier.
 

@@ -37,7 +37,13 @@ export function syncUrl() {
   } else {
     url.searchParams.delete("s");
   }
-  history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  // Only touch history when the address actually changes. This runs on EVERY state notification, and a
+  // model download notifies hundreds of times per second; an unconditional replaceState then trips
+  // Chrome's navigation throttle ("Throttling navigation to prevent the browser from hanging") and the
+  // page freezes while a 1 GB model downloads.
+  const next = `${url.pathname}${url.search}${url.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next !== current) history.replaceState(null, "", next);
 }
 
 /**

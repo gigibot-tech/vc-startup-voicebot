@@ -49,8 +49,10 @@ prefs.similarity = clamp01(prefs.similarity, 0.75);
   const n = Number(prefs.autoResolveMin);
   prefs.autoResolveMin = Number.isFinite(n) ? n : 0.75;
 }
-const BROWSER_LLM_VALUES = new Set(["granite-3b", "gemma-3n-e2b", "transformers"]);
-if (prefs.llm === "transformers") prefs.llm = "granite-3b";
+const BROWSER_LLM_VALUES = new Set(["lfm3-1.7b", "granite-3b", "gemma-3n-e2b"]);
+// LFM3 1.7B is the default browser model; "transformers" is the oldest id. A stored "granite-3b"
+// is a deliberate choice and stays.
+if (prefs.llm === "transformers") prefs.llm = "lfm3-1.7b";
 if (!BROWSER_LLM_VALUES.has(prefs.llm) && prefs.llm !== "ollama") prefs.llm = "ollama";
 if (!["", "classic", "livekit"].includes(prefs.voiceMode)) prefs.voiceMode = "";
 if (prefs.tts === "transformers") prefs.tts = "local";

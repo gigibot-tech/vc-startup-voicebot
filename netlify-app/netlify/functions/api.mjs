@@ -166,16 +166,25 @@ function pickReplyFields(session) {
   return { asks, backup: rest.find((k) => !asks.includes(k)) || null };
 }
 
-const replyRules = `
+// !! Rules that only apply sometimes ("last question" wording, the [[intake:end]] marker) are added by
+// replyRules() ONLY when they apply. Small models (Granite 4 3B, LFM3 1.7B) copy any phrase they see: with
+// both always present, LFM3 wrote "Letzte kurze Frage:" every turn and appended "[[dossier:yes]] Then
+// [[intake:end]]." with many fields open. Twin: reply_rules() in prompts.py.
+const replyRulesBase = `
 
 YOUR TASK THIS TURN (the dossier is 1 turn behind 'Founder just said'):
-1) At most one short clause acknowledging 'Founder just said'.
+1) At most one short clause reacting to 'Founder just said' — in your own words, do not repeat what the founder said.
 2) Ask ASK_1 and ASK_2 as TWO short questions, one each. If 'Founder just said' already answers one of them (even roughly, or with 0 / none / noch nicht), ask BACKUP instead.
 3) Do not ask again about ASKED_LAST_TURN (unless RE_ASK says so) or ALREADY_ANSWERED.
-4) Write a NEW reply in your own words. Speak like a person: no lists, no field names, no technical keys, never mention other open topics.
-5) Only ASK_1 given (ASK_2: none): say it is the last question before the dossier is complete ('Letzte kurze Frage:' / 'One last question:') and ask just that one.
-6) ASK_1: none, or 'Founder just said' answers the last open field: short wrap-up (they can continue or finalize in the UI), then on its own last line [[intake:end]].
+4) Write a NEW reply. Speak like a person: no lists, no field names, no technical keys, never mention other open topics, never write square brackets.
 Spoken, at most 2 sentences, no markdown.`;
+const replyLastRule = `
+5) ASK_2 is none: this is the last open topic. Say it is the last question before the dossier is complete ('Letzte kurze Frage:' / 'One last question:') and ask just ASK_1. If 'Founder just said' already answers ASK_1, wrap up instead (see below).`;
+const replyWrapupRule = `
+WRAP UP: nothing useful is left to ask. Speak a short wrap-up (the dossier is ready — they can continue asking or finalize in the UI). Do not finalize yourself.`;
+const replyRules = (nAsks) => nAsks >= 2 ? replyRulesBase
+  : nAsks === 1 ? replyRulesBase + replyLastRule + replyWrapupRule
+  : `${replyRulesBase}\n5) ASK_1 is none: every field is filled.${replyWrapupRule}`;
 
 /** Mutates session.last_asked_fields / last_asked_turn — save the session afterwards. */
 function promptFor(session, text, cfg) {
@@ -197,7 +206,7 @@ function promptFor(session, text, cfg) {
     .filter((f) => String(session.objects?.[slot]?.fields?.[f] || "").trim())
     .map((f) => `${fieldHint(`${slot}.${f}`)}: ${String(session.objects[slot].fields[f]).trim().slice(0, 80)}`)).join("; ") || "none";
   const language = session.language === "en" ? "English" : "German";
-  const system = `${cfg.reply_system_prompt}\nReply in ${language}. Do not invent facts.${replyRules}`;
+  const system = `${cfg.reply_system_prompt}\nReply in ${language}. Do not invent facts.${replyRules(asks.length)}`;
   const user = [
     `ASK_1: ${asks[0] ? fieldHint(asks[0]) : "none — every field is filled (wrap up + [[intake:end]])"}`,
     `ASK_2: ${asks[1] ? fieldHint(asks[1]) : "none"}`,
@@ -214,11 +223,13 @@ function promptFor(session, text, cfg) {
 // list intro right before it ("…zu den folgenden Feldern geben:"): dropping only the keys left
 // "…geben: Diese Felder…" behind (seen with Granite 4 3B). Twin: strip_field_leaks in prompts.py.
 const fieldKeyRe = /\b(?:team|product|traction|market|financing)\.[a-z]+(?:_[a-z]+)*\b/i;
+// Labels of OUR prompt that a small model sometimes echoes ("- ASK_1: team & background").
+const promptLabelRe = /\b(?:ASK_[12]|BACKUP|ALREADY_ANSWERED|ASKED_LAST_TURN|RE_ASK|OPEN_FIELDS_LEFT|FOLLOWUP_MODE)\b|Founder just said/;
 function stripFieldLeaks(text) {
-  if (!text || !fieldKeyRe.test(text)) return text;
+  if (!text || !(fieldKeyRe.test(text) || promptLabelRe.test(text))) return text;
   const kept = [];
   for (const sent of text.split(/\s+/).join(" ").split(/(?<=[.!?…:])\s+/)) {
-    if (fieldKeyRe.test(sent) || /^\s*[-*•]/.test(sent)) break;
+    if (fieldKeyRe.test(sent) || promptLabelRe.test(sent) || /^\s*([-*•]|\(Note)/.test(sent)) break;
     kept.push(sent);
   }
   while (kept.length && kept.at(-1).trimEnd().endsWith(":")) kept.pop();
@@ -245,10 +256,18 @@ function previousAssistant(session) {
   }
   return "";
 }
+// May the reply end the intake? Only when nothing is open except what was just asked (the dossier is one
+// turn behind). Twin: end_allowed in prompts.py.
+function endAllowed(session) {
+  const open = openFieldKeys(session);
+  return !open.length || open.every((k) => (session.last_asked_fields || []).includes(k));
+}
 function guardRepeat(session, reply, cfg, previous = previousAssistant(session)) {
-  if (similarity(reply, previous) < 0.8) return reply;
   const slot = (session.last_asked_fields || [])[0]?.split(".")[0] || session.evaluation?.next_focus_slot || "team";
   const fallback = cfg?.slot_questions?.[slot] || defaults.slot_questions[slot];
+  // No question although fields are open (and this is no wrap-up): ask the catalog question instead of a dead end.
+  if (!reply.includes("?") && !endAllowed(session)) return fallback || reply;
+  if (similarity(reply, previous) < 0.8) return reply;
   return fallback && similarity(fallback, previous) < 0.8 ? fallback : reply;
 }
 const extractSystem = `You extract startup facts from a founder conversation. Return only valid JSON with shape {"updates":{"team":{"fields":{},"summary":"","evidence":[]},"product":{},"traction":{},"market":{},"financing":{}},"belege":{"team":0,"product":0,"traction":0,"market":0,"financing":0}}. Use only facts explicitly stated by the founder. Leave unknown fields empty. Each belege score is 0 to 1 and measures concrete evidence.`;
@@ -307,7 +326,26 @@ async function* streamCompletion(system, user) {
   }
 }
 function sse(event, data) { return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`; }
-function stripMarkers(value) { let text = String(value || ""); for (let i = 0; i < 3; i += 1) text = text.replace(/\s*\[\[\s*(?:dossier\s*:\s*(?:yes|no)|intake\s*:\s*end)\s*\]\]\s*$/i, ""); return stripFieldLeaks(text.trim()); }
+// Brings a small model's reply into the requested shape: at most one lead-in sentence + two questions, list
+// markers dropped, claims after the last question cut (LFM3 wrote "…ich habe alles im Dossier aufgenommen").
+// A reply with no question (wrap-up) is only de-listed and capped at three sentences. Twin: tidy_reply in prompts.py.
+function tidyReply(text, maxQuestions = 2, maxLead = 1) {
+  const flat = String(text || "").replace(/^\s*(?:\d+[.)]|[-*•])\s+/gm, "").split(/\s+/).join(" ").trim();
+  if (!flat) return "";
+  const sentences = flat.split(/(?<=[.!?…:])\s+/).filter(Boolean), isQ = (x) => x.trimEnd().endsWith("?");
+  const firstQ = sentences.findIndex(isQ);
+  if (firstQ < 0) return sentences.slice(0, 3).join(" ");
+  const lead = maxLead ? sentences.slice(0, firstQ).filter((x) => !x.trimEnd().endsWith(":")).slice(-maxLead) : [];
+  return [...lead, ...sentences.slice(firstQ).filter(isQ).slice(0, maxQuestions)].join(" ");
+}
+// Removes every [[dossier:…]] / [[intake:end]] marker wherever the model put it (LFM3 wrote "…[[dossier:yes]]
+// Then [[intake:end]]."), plus the connector debris left behind. Twin: split_reply_marks in prompts.py.
+function stripMarkers(value) {
+  let text = String(value || "").replace(/\[\[\s*(?:dossier\s*:\s*(?:yes|no)|intake\s*:\s*end)\s*\]\]/gi, "").replace(/[ \t]{2,}/g, " ").trim();
+  text = text.replace(/(?:\s*(?:→|->|=>|then|dann|und dann|und)\s*)+[.!]?\s*$/i, "").trim();
+  const clean = stripFieldLeaks(text);
+  return tidyReply(clean) || clean;
+}
 function parseJson(raw) { const text = String(raw || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""); try { return JSON.parse(text); } catch { const start = text.indexOf("{"); const end = text.lastIndexOf("}"); return start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : {}; } }
 function mergeExtract(session, result) {
   const updates = result?.updates || result?.slots || {};

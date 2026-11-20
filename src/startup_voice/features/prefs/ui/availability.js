@@ -31,7 +31,7 @@ export function serverLlmOption({ provider, model, dev, lang = "de" }) {
   return { label: `${name}${model ? ` · ${model}` : ""}`, disabled: false };
 }
 
-export const BROWSER_LLM_DEFAULT = "granite-3b";
+export const BROWSER_LLM_DEFAULT = "lfm3-1.7b";
 
 /**
  * Apply the rules to the page and to prefs. Returns true when prefs changed (caller saves + repaints).
