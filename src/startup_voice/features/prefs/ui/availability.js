@@ -2,8 +2,9 @@
  * What the Settings dropdowns may offer, from the server's /health and where the app runs.
  *
  *  - Ollama is a local developer tool: on a deployed URL its option is disabled and the reply model
- *    falls back to the browser (WebGPU) model. A server LLM that is NOT Ollama (Scaleway, OpenAI,
- *    any OpenAI-compatible endpoint) keeps working everywhere: it uses the same "server" option.
+ *    falls back to the browser (WebGPU) model. A server LLM that is NOT Ollama (Scaleway, any
+ *    OpenAI-compatible endpoint) keeps working everywhere: it uses the same "server" option.
+ *    provider "none" (nothing configured) disables it.
  *  - A cloud speech provider that is not configured / out of credits is disabled, not offered.
  */
 
@@ -23,7 +24,10 @@ export function serverLlmOption({ provider, model, dev, lang = "de" }) {
       ? { label: `Ollama (${de ? "lokal" : "local"} · ${model || "Granite 4.2 8B"})`, disabled: false }
       : { label: `Ollama (${de ? "nur lokal" : "local only"})`, disabled: true };
   }
-  const name = p === "openai_compatible" || p === "vllm" ? (de ? "Server-KI" : "Server AI") : "OpenAI";
+  // "none" = the server has no reply model configured (Netlify without LLM keys): fail fast in the UI
+  // instead of offering an option whose first call errors.
+  if (p === "none") return { label: de ? "Server-KI (nicht eingerichtet)" : "Server AI (not set up)", disabled: true };
+  const name = p === "scaleway" ? "Scaleway" : (de ? "Server-KI" : "Server AI");
   return { label: `${name}${model ? ` · ${model}` : ""}`, disabled: false };
 }
 

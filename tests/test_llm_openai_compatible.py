@@ -88,3 +88,55 @@ def test_stream_yields_chunks_in_order(seen):
 def test_mistral_small_gets_a_large_context_window(monkeypatch):
     monkeypatch.delenv("LLM_CONTEXT_WINDOW", raising=False)
     assert resolve_context_window(MODEL) == 131072
+
+
+# --- Scaleway provider + fail fast ---------------------------------------------------------
+
+
+def _clear_llm_env(monkeypatch):
+    for name in ("LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY", "SCW_SECRET_KEY", "SCW_PROJECT_ID"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_scaleway_builds_project_url_and_uses_scw_key(monkeypatch, seen):
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "scaleway")
+    monkeypatch.setenv("SCW_SECRET_KEY", "scw-key")
+    monkeypatch.setenv("SCW_PROJECT_ID", "7c26ffc3-c3fd-4e86-bca2-5ebecc4fac83")
+    llm = ConfigurableLLM()
+    assert llm.model == "deepseek-v4.1-flash-1017"
+    llm.complete("sys", "usr")
+    (req,) = seen
+    assert str(req.url) == (
+        "https://api.scaleway.ai/7c26ffc3-c3fd-4e86-bca2-5ebecc4fac83/v1/chat/completions"
+    )
+    assert req.headers["authorization"] == "Bearer scw-key"
+    assert json.loads(req.content)["model"] == "deepseek-v4.1-flash-1017"
+
+
+def test_scaleway_without_key_fails_fast(monkeypatch):
+    from startup_voice.features.interview.llm import LLMConfigError
+
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "scaleway")
+    with pytest.raises(LLMConfigError, match="SCW_SECRET_KEY"):
+        ConfigurableLLM()
+
+
+@pytest.mark.parametrize("provider", ["openai", "gpt", "anthropic"])
+def test_unknown_provider_fails_fast(monkeypatch, provider):
+    from startup_voice.features.interview.llm import LLMConfigError
+
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", provider)
+    with pytest.raises(LLMConfigError, match="not supported"):
+        ConfigurableLLM()
+
+
+def test_openai_compatible_needs_explicit_url_and_model(monkeypatch):
+    from startup_voice.features.interview.llm import LLMConfigError
+
+    _clear_llm_env(monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    with pytest.raises(LLMConfigError, match="LLM_BASE_URL and LLM_MODEL"):
+        ConfigurableLLM()

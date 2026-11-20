@@ -11,7 +11,7 @@ The browser never reaches it directly; the call chain is::
 Voice (STT/TTS) is not involved here at all: this module sees text in, text out.
 
 Two entry points, one per delivery style, each with a provider switch
-(``LLM_PROVIDER``: ollama | openai | openai_compatible | vllm):
+(``LLM_PROVIDER``: ollama | scaleway | openai_compatible | vllm — see ``PROVIDERS``):
 
     complete()  blocking, returns the whole string   -> _ollama / _openai
     stream()    generator, yields chunks as produced -> _ollama_stream / _openai_stream
@@ -163,6 +163,24 @@ def resolve_context_window(model: str) -> int:
     return 8192
 
 
+# Fail fast: an unknown provider or a missing key stops the app at startup instead of
+# silently pointing at some default host. There is deliberately NO "openai" provider and no
+# api.openai.com / gpt-4o-mini default — use openai_compatible with an explicit base URL.
+PROVIDERS = ("ollama", "scaleway", "openai_compatible", "vllm")
+_OPENAI_WIRE = {"scaleway", "openai_compatible", "vllm"}
+SCALEWAY_DEFAULT_MODEL = "deepseek-v4.1-flash-1017"
+
+
+class LLMConfigError(RuntimeError):
+    """The LLM env is incomplete or names an unknown provider (raised at startup)."""
+
+
+def scaleway_base_url(project_id: str) -> str:
+    """Scaleway Generative APIs endpoint; the project id scopes billing / IAM."""
+    pid = (project_id or "").strip()
+    return f"https://api.scaleway.ai/{pid}/v1" if pid else "https://api.scaleway.ai/v1"
+
+
 class ConfigurableLLM:
     def __init__(
         self,
@@ -172,10 +190,37 @@ class ConfigurableLLM:
         base_url: str | None = None,
         api_key: str | None = None,
     ) -> None:
-        self.provider = (provider or os.getenv("LLM_PROVIDER", "ollama")).lower()
-        self.model = model or os.getenv("LLM_MODEL", "granite4.2:8b")
-        self.base_url = (base_url or os.getenv("LLM_BASE_URL", "http://127.0.0.1:11434")).rstrip("/")
-        self.api_key = api_key or os.getenv("LLM_API_KEY", "")
+        self.provider = (provider or os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
+        if self.provider not in PROVIDERS:
+            raise LLMConfigError(
+                f"LLM_PROVIDER={self.provider!r} is not supported. Use one of: {', '.join(PROVIDERS)}."
+            )
+        env_model = os.getenv("LLM_MODEL", "").strip()
+        env_base = os.getenv("LLM_BASE_URL", "").strip()
+        env_key = os.getenv("LLM_API_KEY", "").strip()
+        if self.provider == "scaleway":
+            self.model = model or env_model or SCALEWAY_DEFAULT_MODEL
+            self.base_url = (
+                base_url or env_base or scaleway_base_url(os.getenv("SCW_PROJECT_ID", ""))
+            ).rstrip("/")
+            self.api_key = api_key or os.getenv("SCW_SECRET_KEY", "").strip() or env_key
+            if not self.api_key:
+                raise LLMConfigError(
+                    "LLM_PROVIDER=scaleway needs SCW_SECRET_KEY (Scaleway console → IAM → API keys)."
+                )
+        elif self.provider == "ollama":
+            self.model = model or env_model or "granite4.2:8b"
+            self.base_url = (base_url or env_base or "http://127.0.0.1:11434").rstrip("/")
+            self.api_key = api_key or env_key
+        else:  # openai_compatible / vllm: nothing is guessed
+            self.model = model or env_model
+            self.base_url = (base_url or env_base).rstrip("/")
+            self.api_key = api_key or env_key
+            missing = [n for n, v in (("LLM_BASE_URL", self.base_url), ("LLM_MODEL", self.model)) if not v]
+            if missing:
+                raise LLMConfigError(
+                    f"LLM_PROVIDER={self.provider} needs {' and '.join(missing)} (no default host/model)."
+                )
         self.last_meta: dict[str, Any] = {}
 
     @property
@@ -232,7 +277,7 @@ class ConfigurableLLM:
         max_tokens: int | None = None,
         json_mode: bool = False,
     ) -> str:
-        if self.provider in {"openai", "openai_compatible", "vllm"}:
+        if self.provider in _OPENAI_WIRE:
             return self._openai(system, user, max_tokens=max_tokens, json_mode=json_mode)
         return self._ollama(system, user, max_tokens=max_tokens, json_mode=json_mode)
 
@@ -311,7 +356,7 @@ class ConfigurableLLM:
         Each yielded string is a raw fragment: may be a word piece, may start or
         end mid-word. The caller concatenates them.
         """
-        if self.provider in {"openai", "openai_compatible", "vllm"}:
+        if self.provider in _OPENAI_WIRE:
             yield from self._openai_stream(system, user, max_tokens=max_tokens)
         else:
             yield from self._ollama_stream(system, user, max_tokens=max_tokens)

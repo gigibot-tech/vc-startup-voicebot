@@ -17,9 +17,10 @@ Set these environment variables in the Netlify site settings before deploying:
 
 | Variable | Required | Example |
 |---|---:|---|
-| `LLM_API_KEY` | no | Own key for an OpenAI-compatible model endpoint; otherwise Netlify AI Gateway can supply the OpenAI-compatible key/base URL |
-| `LLM_BASE_URL` | no | Custom OpenAI-compatible endpoint; otherwise the Netlify AI Gateway URL or OpenAI URL is used |
-| `LLM_MODEL` | no | Model supported by the selected endpoint; default `gpt-4o-mini` |
+| `LLM_PROVIDER` | for a server model | `scaleway` or `openai_compatible`. Unset = no server model: Settings disables it and the browser (WebGPU) model is used |
+| `SCW_SECRET_KEY` / `SCW_PROJECT_ID` | `scaleway` | Scaleway IAM key / project id (endpoint `https://api.scaleway.ai/<id>/v1`) |
+| `LLM_MODEL` | `openai_compatible` | Model id; for `scaleway` optional (default `deepseek-v4.1-flash-1017`) |
+| `LLM_BASE_URL` / `LLM_API_KEY` | `openai_compatible` | Endpoint and key. No OpenAI / Netlify AI Gateway fallback (`OPENAI_*` is ignored) |
 | `ELEVENLABS_API_KEY` | no | Enables server-generated spoken replies and cloud speech recognition |
 | `ELEVENLABS_VOICE_ID` | TTS only | Voice ID from ElevenLabs |
 | `IDO_ORIGINS` | only when embedded | Comma-separated trusted ido-core origins |
@@ -31,17 +32,16 @@ development environment; local data is stored in the ignored `.local-data/` fold
 The Netlify version keeps the interview, dossier, session management, PDF/Markdown/JSON export,
 browser speech recognition, and optional ElevenLabs speech input/output. LiveKit is not included:
 its current voice mode relies on a separate always-running worker, which this Netlify app does not
-host. The Node server does not probe the LLM at startup; it reports provider configuration errors
-when an interview turn is requested. Netlify AI Gateway supplies model API credentials on supported
-credit-based plans only; on other plans set `LLM_API_KEY` + `LLM_BASE_URL` + `LLM_MODEL` yourself
-(e.g. Scaleway: `https://api.scaleway.ai/v1`, `mistral-small-3.2-24b-instruct-2506`).
+host. The Node server does not probe the LLM at startup, but `/health` reports provider `none` when
+the config is incomplete, so Settings disables the server model instead of failing on the first
+turn; a turn against it answers 503 with the missing variable names.
 Function time limits of your plan apply to one interview turn (reply + dossier update).
 
 ## Deploy steps
 
 1. Install dependencies in this folder with `npm install`.
 2. In Netlify, connect this repository and set the base directory to `netlify-app`.
-3. For Netlify AI Gateway, enable AI features for the team and choose a supported model via
-   `LLM_MODEL`. Alternatively, add your own `LLM_API_KEY` (and, if needed, `LLM_BASE_URL`) as
-   runtime environment variables.
+3. For a server reply model set `LLM_PROVIDER=scaleway` + `SCW_SECRET_KEY` + `SCW_PROJECT_ID`
+   (or `openai_compatible` + `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL`) as runtime environment
+   variables. Without them the app runs with the browser (WebGPU) model only.
 4. Deploy. No special server runtime is needed.

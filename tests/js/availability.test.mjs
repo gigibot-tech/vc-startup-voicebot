@@ -25,6 +25,21 @@ test("a non-Ollama server LLM (Scaleway) stays usable on a deployed URL", () => 
   assert.match(o.label, /Server-KI/);
 });
 
+test("Scaleway gets its own label; an unconfigured server LLM is disabled (fail fast)", () => {
+  assert.match(serverLlmOption({ provider: "scaleway", model: "deepseek-v4.1-flash-1017", dev: false }).label, /^Scaleway · deepseek/);
+  const none = serverLlmOption({ provider: "none", dev: false });
+  assert.equal(none.disabled, true);
+  assert.match(none.label, /nicht eingerichtet/);
+  assert.doesNotMatch(serverLlmOption({ provider: "openai_compatible", dev: false }).label, /OpenAI/);
+});
+
+test("deployed without a server LLM: the reply model moves to the browser one", () => {
+  const doc = fakeDoc([['#llmSel option[value="ollama"]', "Ollama"]]);
+  const prefs = { llm: "ollama", lang: "de" };
+  assert.equal(applyAvailability({ prefs, health: { llm_provider: "none" }, hostname: "x.netlify.app", doc }), true);
+  assert.equal(prefs.llm, "granite-3b");
+});
+
 test("deployed + Ollama: the option is disabled and the reply model moves to the browser one", () => {
   const doc = fakeDoc([['#llmSel option[value="ollama"]', "Ollama"]]);
   const prefs = { llm: "ollama", lang: "de" };

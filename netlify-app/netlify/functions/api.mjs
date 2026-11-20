@@ -256,20 +256,41 @@ function extractUser(session, latest) {
   return `Conversation language: ${session.language}. Latest founder statement: ${latest}\n\nFull founder transcript:\n${(session.messages || []).filter((m) => m.role === "user").map((m) => m.content).join("\n")}\n\nCurrent dossier:\n${JSON.stringify(session.objects)}`;
 }
 function responseText(data) { return data?.choices?.[0]?.message?.content || data?.choices?.[0]?.text || ""; }
+// Server reply model (only used when the browser does NOT run its own WebGPU model). Fail fast:
+// no silent api.openai.com / gpt-4o-mini / OPENAI_API_KEY fallback — an unset or incomplete config
+// reports provider "none" in /health (the UI disables the option) and errors on use.
+//   LLM_PROVIDER=scaleway          SCW_SECRET_KEY, SCW_PROJECT_ID, optional LLM_MODEL
+//   LLM_PROVIDER=openai_compatible LLM_BASE_URL, LLM_API_KEY, LLM_MODEL (all required)
+// Twin: ConfigurableLLM in src/startup_voice/features/interview/llm.py.
+const SCALEWAY_DEFAULT_MODEL = "deepseek-v4.1-flash-1017";
+function llmConfig() {
+  const env = process.env, provider = String(env.LLM_PROVIDER || "").trim().toLowerCase();
+  if (provider === "scaleway") {
+    const pid = String(env.SCW_PROJECT_ID || "").trim();
+    const base = (env.LLM_BASE_URL || (pid ? `https://api.scaleway.ai/${pid}/v1` : "https://api.scaleway.ai/v1")).replace(/\/+$/, "");
+    const key = String(env.SCW_SECRET_KEY || env.LLM_API_KEY || "").trim();
+    return { provider, base, key, model: String(env.LLM_MODEL || "").trim() || SCALEWAY_DEFAULT_MODEL, missing: key ? [] : ["SCW_SECRET_KEY"] };
+  }
+  if (provider === "openai_compatible" || provider === "vllm") {
+    const base = String(env.LLM_BASE_URL || "").trim().replace(/\/+$/, ""), key = String(env.LLM_API_KEY || "").trim(), model = String(env.LLM_MODEL || "").trim();
+    return { provider, base, key, model, missing: [["LLM_BASE_URL", base], ["LLM_API_KEY", key], ["LLM_MODEL", model]].filter(([, v]) => !v).map(([n]) => n) };
+  }
+  return { provider: provider || "none", base: "", key: "", model: "", missing: [provider ? `LLM_PROVIDER=${provider} is not supported (use scaleway or openai_compatible)` : "LLM_PROVIDER"] };
+}
+function requireLlm() {
+  const cfg = llmConfig();
+  if (cfg.missing.length) throw Object.assign(new Error(`Server LLM not set up — Netlify env needs: ${cfg.missing.join(", ")}. Or pick a browser model in Settings.`), { status: 503 });
+  return cfg;
+}
 async function complete(system, user, { jsonMode = false, maxTokens = 900 } = {}) {
-  const key = process.env.LLM_API_KEY || process.env.OPENAI_API_KEY;
-  if (!key) throw Object.assign(new Error("Set LLM_API_KEY (or OPENAI_API_KEY) in Netlify environment variables."), { status: 503 });
-  const base = (process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const model = process.env.LLM_MODEL || "gpt-4o-mini";
+  const { base, key, model } = requireLlm();
   const res = await fetch(`${base}/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ model, max_tokens: maxTokens, ...(jsonMode ? { response_format: { type: "json_object" } } : {}), messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
   if (!res.ok) throw new Error(`LLM provider returned ${res.status}: ${(await res.text()).slice(0, 500)}`);
   return responseText(await res.json()).trim();
 }
 async function* streamCompletion(system, user) {
-  const key = process.env.LLM_API_KEY || process.env.OPENAI_API_KEY;
-  if (!key) throw Object.assign(new Error("Set LLM_API_KEY (or OPENAI_API_KEY) in Netlify environment variables."), { status: 503 });
-  const base = (process.env.LLM_BASE_URL || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const res = await fetch(`${base}/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ model: process.env.LLM_MODEL || "gpt-4o-mini", stream: true, messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
+  const { base, key, model } = requireLlm();
+  const res = await fetch(`${base}/chat/completions`, { method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" }, body: JSON.stringify({ model, stream: true, messages: [{ role: "system", content: system }, { role: "user", content: user }] }) });
   if (!res.ok) throw new Error(`LLM provider returned ${res.status}: ${(await res.text()).slice(0, 500)}`);
   const reader = res.body.getReader(), decoder = new TextDecoder();
   let buffer = "";
@@ -464,7 +485,7 @@ export default async function handler(request) {
     if (path === "/health" && method === "GET") {
       const sessions = await listSessions();
       const speechReady = Boolean(process.env.ELEVENLABS_API_KEY);
-      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], llm_provider: "openai_compatible", llm_model: process.env.LLM_MODEL || "gpt-4o-mini", voice_settings: {}, voice_modes: ["classic"], voice_mode: "classic" });
+      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], ...(() => { const c = llmConfig(); return c.missing.length ? { llm_provider: "none", llm_model: "" } : { llm_provider: c.provider, llm_model: c.model }; })(), voice_settings: {}, voice_modes: ["classic"], voice_mode: "classic" });
     }
     if (path === "/api/dossier-schema" && method === "GET") return json(schemaResponse());
     if (path === "/api/ido/config" && method === "GET") return json({ origins: String(process.env.IDO_ORIGINS || "").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean) });

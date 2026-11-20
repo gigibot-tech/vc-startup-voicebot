@@ -34,10 +34,11 @@ The app pings the LLM on startup and refuses to start if it does not answer.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LLM_PROVIDER` | `ollama` | `ollama`, `openai`, `openai_compatible` or `vllm` |
-| `LLM_MODEL` | `granite4.2:8b` | model name |
-| `LLM_BASE_URL` | `http://127.0.0.1:11434` | LLM server |
-| `LLM_API_KEY` | – | only for OpenAI-compatible servers |
+| `LLM_PROVIDER` | `ollama` | `ollama`, `scaleway`, `openai_compatible` or `vllm` (anything else stops the app) |
+| `LLM_MODEL` | `granite4.2:8b` (ollama), `deepseek-v4.1-flash-1017` (scaleway) | model name; required for `openai_compatible` |
+| `LLM_BASE_URL` | `http://127.0.0.1:11434` (ollama) | LLM server; required for `openai_compatible` |
+| `LLM_API_KEY` | – | key for `openai_compatible` / `vllm` |
+| `SCW_SECRET_KEY` / `SCW_PROJECT_ID` | – | Scaleway IAM key (required for `scaleway`) / project id |
 | `LLM_TIMEOUT` / `LLM_PROBE_TIMEOUT` | `120` / `8` | seconds per call / startup ping |
 | `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `ELEVENLABS_TTS_MODEL` | – | text-to-speech |
 | `DEEPGRAM_API_KEY` | – | speech-to-text |
@@ -47,15 +48,18 @@ The app pings the LLM on startup and refuses to start if it does not answer.
 
 ### Using an EU cloud LLM instead of local Ollama
 
-Any OpenAI-compatible endpoint works; only three variables change. Example with
-[Scaleway Generative APIs](https://www.scaleway.com/en/generative-apis/) (France, first 1M tokens free):
+[Scaleway Generative APIs](https://www.scaleway.com/en/generative-apis/) (France) has its own provider:
 
 ```bash
-LLM_PROVIDER=openai_compatible
-LLM_BASE_URL=https://api.scaleway.ai/v1
-LLM_MODEL=mistral-small-3.2-24b-instruct-2506
-LLM_API_KEY=<Scaleway secret key>
+LLM_PROVIDER=scaleway
+SCW_SECRET_KEY=<Scaleway IAM secret key>
+SCW_PROJECT_ID=<project id>          # endpoint: https://api.scaleway.ai/<project id>/v1
+LLM_MODEL=deepseek-v4.1-flash-1017   # optional (default)
 ```
+
+Any other OpenAI-compatible endpoint (IONOS, STACKIT, OVHcloud, vLLM) uses
+`LLM_PROVIDER=openai_compatible` with `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY` — all required,
+nothing is guessed. There is no `openai` provider and no OpenAI default (fail fast).
 
 Pick a **non-reasoning** model: reasoning models (e.g. `gpt-oss-120b`) spend `max_tokens` on hidden
 thinking and can return empty replies. `run.sh` does not check non-Ollama providers; the app pings
