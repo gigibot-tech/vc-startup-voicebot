@@ -159,3 +159,53 @@ def test_chat_conflict_and_resolve_endpoint(tmp_path: Path, monkeypatch):
     assert team["fields"]["founders_roles"] == "CEO, CTO und CPO" and not team["pending"]
     saved = client.get(f"/api/sessions/{sid}").json()["objects"]["team"]
     assert saved["fields"]["founders_roles"] == "CEO, CTO und CPO"
+
+
+def _lfm3_copied_keine_update():
+    """Real LFM3 1.7B extract (turn 3): 'keine' written into every field it could not fill."""
+    keine = {"customers_pilots": "keine", "metrics_revenue": "keine", "growth_signal": "keine"}
+    return {
+        "traction": {
+            "fields": keine,
+            "evidence": ["Noch keine Nutzer, kein Umsatz."],
+        },
+        "market": {
+            "fields": {"target_icp": "keine", "market_size": "keine", "competitors_moat": "keine"},
+            "evidence": [],
+        },
+        "financing": {
+            "fields": {"raise_amount_round": "keine", "use_of_funds": "keine", "runway_milestones": "keine"},
+            "evidence": ["Ich bin allein, arbeite nebenher daran."],
+        },
+    }
+
+
+def test_copied_denial_placeholders_are_dropped_without_a_denial_quote():
+    from startup_voice.domain import InterviewSession, TurnMessage
+    from startup_voice.features.dossier.review import apply_extract_updates, drop_copied_placeholders
+
+    session = InterviewSession.create(language="de")
+    session.messages.append(
+        TurnMessage(role="user", content="Ich bin allein, arbeite nebenher daran. Noch keine Nutzer, kein Umsatz.")
+    )
+    updates = _lfm3_copied_keine_update()
+    assert drop_copied_placeholders(session, updates) == 6
+    assert updates["traction"]["fields"]["customers_pilots"] == "keine"  # grounded: quote with a denial
+    assert all(v == "" for v in updates["market"]["fields"].values())
+    assert all(v == "" for v in updates["financing"]["fields"].values())  # quote has no denial word
+
+    session.turn_index = 1
+    apply_extract_updates(session, _lfm3_copied_keine_update(), {}, turn=1)
+    assert session.objects["market"].fields.get("target_icp", "") == ""
+    assert session.objects["traction"].fields["metrics_revenue"] == "keine"
+
+
+def test_a_single_honest_denial_is_kept():
+    from startup_voice.domain import InterviewSession, TurnMessage
+    from startup_voice.features.dossier.review import drop_copied_placeholders
+
+    session = InterviewSession.create(language="de")
+    session.messages.append(TurnMessage(role="user", content="Wir haben noch keinen Umsatz."))
+    updates = {"traction": {"fields": {"metrics_revenue": "keine"}, "evidence": []}}
+    assert drop_copied_placeholders(session, updates) == 0
+    assert updates["traction"]["fields"]["metrics_revenue"] == "keine"

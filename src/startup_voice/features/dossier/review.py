@@ -27,6 +27,7 @@ a source NOT listed overwrites silently (the old behaviour).
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -291,6 +292,58 @@ def ground_extract_in_founder(session: InterviewSession, updates: dict[str, Any]
                 payload["fields"][key] = quote
 
 
+# A denial / "nothing" answer a small model (LFM3 1.7B) copies into every field it cannot fill:
+# one "Noch keine Nutzer, kein Umsatz." became 'keine' in all of market.* and financing.* and the
+# dossier looked 100 % complete. No topic keywords: the check is whether the slot cites a real
+# founder quote that itself contains a denial.
+_PLACEHOLDER_VALUES = frozenset({
+    "keine", "kein", "keiner", "keines", "nein", "nichts", "noch nicht", "keine angabe", "k.a.", "ka",
+    "none", "no", "nothing", "not yet", "n/a", "na", "unknown", "unbekannt", "0", "null", "-", "–",
+})
+_DENIAL_TOKEN_RE = re.compile(r"\b(?:kein\w*|nicht|nein|nichts|none|no|not|nothing|never|null)\b|\b0\b", re.IGNORECASE)
+
+
+def _placeholder_key(value: Any) -> str:
+    return " ".join(str(value or "").strip().strip(".,;:!\"'()").lower().split())
+
+
+def drop_copied_placeholders(
+    session: InterviewSession, updates: dict[str, Any], *, min_copies: int = 3
+) -> int:
+    """Empty denial placeholders that the extract copied into several fields without evidence.
+
+    When the same placeholder ("keine", "none", "0", …) fills ``min_copies`` or more fields of one
+    extract, it is kept only in slots whose ``evidence`` has a quote that (a) occurs in the founder's
+    messages and (b) contains a denial word. Everything else is set to "" (= not answered, asked
+    again). Returns how many fields were emptied.
+    """
+    spots: list[tuple[dict[str, Any], str, str]] = []
+    for payload in updates.values():
+        if not isinstance(payload, dict) or not isinstance(payload.get("fields"), dict):
+            continue
+        for key, val in payload["fields"].items():
+            norm = _placeholder_key(val)
+            if norm in _PLACEHOLDER_VALUES:
+                spots.append((payload, key, norm))
+    counts = Counter(norm for _, _, norm in spots)
+    founder = _message_blob(session, "user").lower()
+    emptied = 0
+    for payload, key, norm in spots:
+        if counts[norm] < min_copies:
+            continue
+        quotes = payload.get("evidence") or []
+        quotes = [quotes] if isinstance(quotes, str) else quotes
+        grounded = any(
+            _placeholder_key(q) and _placeholder_key(q) in " ".join(founder.split())
+            and _DENIAL_TOKEN_RE.search(str(q))
+            for q in quotes
+        )
+        if not grounded:
+            payload["fields"][key] = ""
+            emptied += 1
+    return emptied
+
+
 def apply_extract_updates(
     session: InterviewSession,
     updates: dict[str, Any],
@@ -302,6 +355,7 @@ def apply_extract_updates(
     """Postprocess extract: merge touched slots + apply belege map. Returns touched slot ids."""
     touched: list[SlotId] = []
     ground_extract_in_founder(session, updates)
+    drop_copied_placeholders(session, updates)
     for slot in SLOT_ORDER:
         if slot not in updates:
             continue

@@ -569,6 +569,26 @@ def fallback_question(session: InterviewSession) -> str:
     return " ".join(x for x in parts if x)
 
 
+_GERMAN_WORDS = frozenset(
+    "der die das den dem des ein eine einen einem und oder ist sind war habt haben hast hat wir ihr "
+    "du ich sie es was wie wer wo wann warum welche welcher welches wieviel wofür für mit von zu zum "
+    "zur auf bei nach nicht noch schon auch aber wenn dass dann gibt gibt's euer eure euch dein deine "
+    "dir dich uns mir mich kann könnt könnten wollt wird werden".split()
+)
+
+
+def looks_german(text: str) -> bool:
+    """Rough check that ``text`` is German: any common German function word. Short texts pass.
+
+    Not a topic check — LFM3 1.7B switched to English mid-conversation ("Sounds great — I've noted…").
+    Function words only, so a German reply always contains at least one of them.
+    """
+    words = re.findall(r"[a-zäöüß']+", (text or "").lower())
+    if len(words) < 4:
+        return True
+    return any(w in _GERMAN_WORDS for w in words)
+
+
 def question_sentences(text: str) -> list[str]:
     """The question sentences of a reply (what the founder would hear as "asked again")."""
     flat = " ".join(_LIST_MARK_RE.sub("", text or "").split())

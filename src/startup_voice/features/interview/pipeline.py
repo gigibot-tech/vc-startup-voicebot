@@ -71,6 +71,7 @@ from startup_voice.features.interview.prompts import (
     field_hint,
     is_repeat,
     fallback_question,
+    looks_german,
     previous_assistant_message,
     repeats_question,
     recent_history,
@@ -616,6 +617,9 @@ class InterviewPipeline:
         fallback = fallback_question(session) or self.config().question_for(
             (session.evaluation.next_focus_slot or "team")  # type: ignore[arg-type]
         )
+        # Wrong language (a small model drifted to English in a German session): ask the German question.
+        if (session.language or "de").lower().startswith("de") and not looks_german(reply):
+            return fallback
         # No question although fields are open (and this is no wrap-up).
         if "?" not in reply and not offer_end and not end_allowed(session):
             return fallback

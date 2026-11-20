@@ -837,3 +837,23 @@ def test_fallback_question_is_field_specific_and_language_aware():
     assert fallback_question(session) == "Welchen Hintergrund und welche Erfahrung bringt ihr mit? Wie groß schätzt ihr den Markt?"
     session.language = "en"
     assert fallback_question(session).startswith("Could you tell me about founder background")
+
+
+def test_english_reply_in_a_german_session_becomes_the_german_fallback(tmp_path: Path):
+    """LFM3 1.7B turn 2: 'Sounds great — I've noted the team and the prototype status. Are you planning…'"""
+    from startup_voice.features.interview.prompts import looks_german
+
+    assert not looks_german("Sounds great — I've noted the team and the prototype status. Are you planning to work full-time?")
+    assert looks_german("Wie groß schätzt ihr den Markt?")
+    assert looks_german("OK")  # too short to judge
+
+    class EnglishLLM:
+        def complete(self, system, user, *, max_tokens=None, json_mode=False):
+            if "extract" in system.lower() or json_mode:
+                return '{"updates":{},"belege":{}}'
+            return "Sounds great, thanks for sharing. Are you planning to work full-time on this project?"
+
+    pipe = InterviewPipeline(EnglishLLM(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session(language="de")
+    session = pipe.process_turn(session, "Ich bin der Gründer.")
+    assert session.messages[-1].content == fallback_question(session)

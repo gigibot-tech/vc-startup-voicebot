@@ -293,8 +293,16 @@ const repeatsQuestion = (reply, previous) => {
 };
 // Never leave a dead end and never ask the same thing twice: no question although fields are open, a copy of the
 // previous message, or last turn's questions behind a new lead-in → two precise questions for this turn's topics.
+// Rough "is this German" check: any common German function word (short texts pass). A small model drifted to
+// English mid-conversation. Twin: looks_german in prompts.py.
+const germanWords = new Set("der die das den dem des ein eine einen einem und oder ist sind war habt haben hast hat wir ihr du ich sie es was wie wer wo wann warum welche welcher welches wieviel wofür für mit von zu zum zur auf bei nach nicht noch schon auch aber wenn dass dann gibt euer eure euch dein deine dir dich uns mir mich kann könnt könnten wollt wird werden".split(" "));
+function looksGerman(text) {
+  const words = String(text || "").toLowerCase().match(/[a-zäöüß']+/g) || [];
+  return words.length < 4 || words.some((w) => germanWords.has(w));
+}
 function guardRepeat(session, reply, cfg, previous = previousAssistant(session)) {
   const fallback = fallbackQuestion(session) || cfg?.slot_questions?.[session.evaluation?.next_focus_slot || "team"] || "";
+  if (!/^en/i.test(session.language || "de") && !looksGerman(reply)) return fallback || reply;
   if (!reply.includes("?") && !endAllowed(session)) return fallback || reply;
   if (similarity(reply, previous) >= 0.8 || repeatsQuestion(reply, previous)) return fallback && similarity(fallback, previous) < 0.8 ? fallback : reply;
   return reply;
@@ -376,8 +384,31 @@ function stripMarkers(value) {
   return tidyReply(clean) || clean;
 }
 function parseJson(raw) { const text = String(raw || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""); try { return JSON.parse(text); } catch { const start = text.indexOf("{"); const end = text.lastIndexOf("}"); return start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : {}; } }
+// A denial a small model (LFM3 1.7B) copies into every field it cannot fill ("keine" in all of market.* and
+// financing.* → dossier looked 100 % complete). The same placeholder in >= 3 fields is kept only in slots whose
+// evidence has a founder quote that contains a denial; the rest is emptied. No topic keywords.
+// Twin: drop_copied_placeholders in src/startup_voice/features/dossier/review.py.
+const placeholderValues = new Set(["keine", "kein", "keiner", "keines", "nein", "nichts", "noch nicht", "keine angabe", "k.a.", "ka", "none", "no", "nothing", "not yet", "n/a", "na", "unknown", "unbekannt", "0", "null", "-", "–"]);
+const denialTokenRe = /\b(?:kein\w*|nicht|nein|nichts|none|no|not|nothing|never|null)\b|\b0\b/i;
+const placeholderKey = (v) => String(v ?? "").trim().replace(/^[.,;:!"'()]+|[.,;:!"'()]+$/g, "").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+function dropCopiedPlaceholders(session, updates, minCopies = 3) {
+  const spots = [];
+  for (const slot of slots) {
+    const patch = updates[slot]; if (!patch || typeof patch !== "object") continue;
+    const flds = patch.fields || patch;
+    for (const field of fields[slot]) { const n = placeholderKey(flds[field]); if (placeholderValues.has(n)) spots.push({ patch, flds, field, n }); }
+  }
+  const counts = new Map(); for (const s of spots) counts.set(s.n, (counts.get(s.n) || 0) + 1);
+  const founder = (session.messages || []).filter((m) => m.role === "user").map((m) => m.content).join(" ").toLowerCase().split(/\s+/).join(" ");
+  for (const { patch, flds, field, n } of spots) {
+    if (counts.get(n) < minCopies) continue;
+    const quotes = Array.isArray(patch.evidence) ? patch.evidence : patch.evidence ? [patch.evidence] : [];
+    if (!quotes.some((q) => placeholderKey(q) && founder.includes(placeholderKey(q)) && denialTokenRe.test(String(q)))) flds[field] = "";
+  }
+}
 function mergeExtract(session, result) {
   const updates = result?.updates || result?.slots || {};
+  dropCopiedPlaceholders(session, updates);
   for (const slot of slots) {
     const patch = updates[slot]; if (!patch || typeof patch !== "object") continue;
     const obj = session.objects[slot], newFields = patch.fields || patch;
