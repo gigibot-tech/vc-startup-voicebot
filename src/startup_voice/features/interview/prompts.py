@@ -18,7 +18,6 @@ calls in strict sequence (never in parallel, so TTS starts immediately):
   │ • User     : ASK_1 + ASK_2 + BACKUP  (picked in Python, skipping the    │
   │                                     fields asked last turn)             │
   │              ALREADY_ANSWERED  flat map of filled slot.field values     │
-  │              ASKED_LAST_TURN   topics of the previous reply (no text!)  │
   │              Founder just said (all unextracted user turns)             │
   │ • Output   : TWO short questions (ASK_1 + ASK_2)                        │
   │              (+ optional trailing [[intake:end]])                       │
@@ -90,7 +89,7 @@ REPLY_RULES = (
     "repeat what the founder said.\n"
     "2) Ask ASK_1 and ASK_2 as TWO short questions, one each. If 'Founder just said' already "
     "answers one of them (even roughly, or with 0 / none / noch nicht), ask BACKUP instead.\n"
-    "3) Do not ask again about ASKED_LAST_TURN (unless RE_ASK says so) or ALREADY_ANSWERED.\n"
+    "3) Never ask about ALREADY_ANSWERED.\n"
     "4) Write a NEW reply. Speak like a person: no lists, no field names, no technical keys, "
     "never mention other open topics, never write square brackets."
 )
@@ -472,7 +471,7 @@ _FIELD_KEY_RE = re.compile(
 )
 # Labels of OUR prompt that a small model sometimes echoes ("- ASK_1: team & background").
 _PROMPT_LABEL_RE = re.compile(
-    r"\b(?:ASK_[12]|BACKUP|ALREADY_ANSWERED|ASKED_LAST_TURN|RE_ASK|OPEN_FIELDS_LEFT|FOLLOWUP_MODE)\b"
+    r"\b(?:ASK_[12]|BACKUP|ALREADY_ANSWERED|RE_ASK|OPEN_FIELDS_LEFT|FOLLOWUP_MODE)\b"
     r"|Founder just said",
 )
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…:])\s+")
@@ -531,6 +530,63 @@ def tidy_reply(text: str, *, max_questions: int = 2, max_lead: int = 1) -> str:
     lead = [x for x in sentences[:first_q] if not x.rstrip().endswith(":")][-max_lead:] if max_lead else []
     questions = [x for x in sentences[first_q:] if x.rstrip().endswith("?")][:max_questions]
     return " ".join(lead + questions)
+
+
+# Deterministic German questions per field: the fallback when a small model returns no question or
+# repeats one. Precise on purpose — the slot-wide catalog questions re-ask several fields at once.
+FIELD_QUESTIONS_DE: dict[str, str] = {
+    "team.founders_roles": "Wer gründet mit, und welche Rolle hat jede Person?",
+    "team.background_expertise": "Welchen Hintergrund und welche Erfahrung bringt ihr mit?",
+    "team.commitment_fulltime": "Arbeitet ihr Vollzeit am Projekt oder nebenher?",
+    "product.problem": "Welches Problem löst ihr, und für wen ist es besonders schmerzhaft?",
+    "product.solution": "Wie löst euer Produkt dieses Problem konkret?",
+    "product.stage_status": "Wo steht das Produkt gerade: Idee, Prototyp, MVP oder live?",
+    "product.usp_tech": "Was ist technisch das Besondere an eurem Produkt?",
+    "traction.customers_pilots": "Gibt es schon Nutzer, Piloten oder Absichtserklärungen? Null ist auch eine Antwort.",
+    "traction.metrics_revenue": "Welche Zahlen habt ihr schon, etwa Umsatz oder Nutzung? Null ist auch okay.",
+    "traction.growth_signal": "Wie entwickeln sich die Nutzer, und was ist das nächste Ziel?",
+    "market.target_icp": "Wer genau ist eure Zielgruppe?",
+    "market.market_size": "Wie groß schätzt ihr den Markt?",
+    "market.competitors_moat": "Wer sind eure Wettbewerber, und was schützt euch vor ihnen?",
+    "financing.raise_amount_round": "Welche Runde plant ihr, und wie viel Kapital braucht ihr?",
+    "financing.use_of_funds": "Wofür würdet ihr das Geld einsetzen?",
+    "financing.runway_milestones": "Wie viele Monate reicht das Geld, und welche Meilensteine wollt ihr erreichen?",
+}
+
+
+def fallback_question(session: InterviewSession) -> str:
+    """Two field-specific questions for the topics Python picked this turn (``last_asked_fields``).
+
+    Used when the model's reply has no question or repeats one. English sessions get a plain
+    template from the field hints instead of the German texts.
+    """
+    keys = (session.last_asked_fields or []) or open_field_keys(session)[:2]
+    german = (session.language or "de").lower().startswith("de")
+    parts = [
+        FIELD_QUESTIONS_DE.get(k, "") if german else f"Could you tell me about {field_hint(k)}?"
+        for k in keys[:2]
+    ]
+    return " ".join(x for x in parts if x)
+
+
+def question_sentences(text: str) -> list[str]:
+    """The question sentences of a reply (what the founder would hear as "asked again")."""
+    flat = " ".join(_LIST_MARK_RE.sub("", text or "").split())
+    return [x for x in _SENTENCE_SPLIT_RE.split(flat) if x.rstrip().endswith("?")]
+
+
+def repeats_question(reply: str, previous: str, *, threshold: float = 0.8) -> bool:
+    """True when any question of ``reply`` is (almost) a question of ``previous``.
+
+    ``is_repeat`` compares whole messages; a different lead-in sentence hid a re-asked
+    question from it (LFM3: "Gute Nachricht – … Wer sind die Gründer?" → "Wer sind die Gründer?").
+    """
+    old = [" ".join(q.lower().split()) for q in question_sentences(previous)]
+    for q in question_sentences(reply):
+        q = " ".join(q.lower().split())
+        if any(difflib.SequenceMatcher(None, q, o).ratio() >= threshold for o in old):
+            return True
+    return False
 
 
 def is_repeat(reply: str, previous: str, *, threshold: float = 0.8) -> bool:
@@ -737,9 +793,10 @@ def build_reply_prompt(
 
     Python picks ASK_1 / ASK_2 / BACKUP (``pick_reply_fields``) and records them in
     ``session.last_asked_fields`` so the next turn moves on. The LLM only phrases the
-    questions. It sees what it asked last turn as TOPICS (``ASKED_LAST_TURN``), never as the
-    old message text, and no transcript with assistant lines: a 3B model copies such text.
-    ``is_repeat`` in the pipeline catches a copy anyway.
+    questions. It sees NOTHING of what it asked last turn — not the text, not even the topics
+    (no transcript with assistant lines, no "asked last turn" line): a small model copies
+    whatever it is shown (LFM3 1.7B re-asked last turn's topics from such a line). Python
+    already skips those fields in ``pick_reply_fields``. The pipeline's repeat guard catches a copy anyway.
     """
     open_keys = open_field_keys(session)
     reused = [k for k in session.last_asked_fields if k in open_keys]
@@ -751,13 +808,11 @@ def build_reply_prompt(
     else:
         re_ask = bool(open_keys) and set(open_keys) <= set(session.last_asked_fields or [])
         asks, backup = pick_reply_fields(session)
-        session.prior_asked_fields = list(session.last_asked_fields or [])
         session.last_asked_fields = list(asks)
         session.last_asked_turn = session.turn_index
 
     pending_turns = unextracted_user_turns(session, user_text)
     combined_user = "\n".join(pending_turns)
-    asked_last_turn = "; ".join(field_hint(k) for k in session.prior_asked_fields) or "none"
     mode = (followup_mode or "balanced").strip().lower()
     mode_hint = FOLLOWUP_MODE_HINTS.get(mode, FOLLOWUP_MODE_HINTS["balanced"])
     unextracted_note = (
@@ -767,7 +822,7 @@ def build_reply_prompt(
         else ""
     )
     re_ask_note = (
-        "RE_ASK: only the ASKED_LAST_TURN topics are still open — if 'Founder just said' does "
+        "RE_ASK: the only open topics are the ones you just asked about — if 'Founder just said' does "
         "not answer them, ask once more, shorter and from a different angle.\n"
         if re_ask
         else ""
@@ -785,9 +840,8 @@ def build_reply_prompt(
         f"OPEN_FIELDS_LEFT: {len(open_keys)}\n"
         f"FOLLOWUP_MODE: {mode} — {mode_hint}\n"
         f"ALREADY_ANSWERED (never re-ask): {already_answered_text(session)}\n"
-        # !! Topics only — NEVER the previous assistant text or a transcript with assistant lines:
-        # Granite 4 3B copied that text verbatim as its next reply (with the old field list).
-        f"ASKED_LAST_TURN (founder is answering this now — do not ask it again): {asked_last_turn}\n"
+        # !! NEVER show the previous assistant text, a transcript with assistant lines, or an "asked last
+        # turn" topic list: Granite copied the text verbatim, LFM3 re-asked the listed topics.
         f"{unextracted_note}"
         f"Founder just said (NOT in dossier yet — credit this first!): {combined_user[:1200]}"
     )

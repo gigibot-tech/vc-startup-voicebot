@@ -105,7 +105,7 @@ Persistenz: `data/sessions/interview_config.json` (Server-SSOT für Prompt + Kat
 
 - Extract attaches per-field **`confidence` (0–1)** on proposals (fallback: slot belege, else 0.5).
 - Prefs **Auto-resolve if confidence ≥** (default **0.75**; Off = 1.01): client POSTs `choice=new` for matching open proposals after render; history in `session.conflict_history` (expandable “Resolved conflicts”).
-- Reply prompt always appends **REPLY_RULES** + `ALREADY_ANSWERED` + `ASKED_LAST_TURN` (topics only — never the previous assistant text or field keys: Granite 4 3B copies text and reads keys aloud). The pipeline swaps a near-copy of the previous reply for a catalog question. Python picks **ASK_1 / ASK_2** (+ BACKUP) from open fields of the prior extract, skipping the fields asked last turn (`session.last_asked_fields`), so the model always asks two short questions and never repeats itself. Pace ≈5 substantive turns.
+- Reply prompt always appends **REPLY_RULES** + `ALREADY_ANSWERED` + (never the previous assistant text, an "asked last turn" list or field keys: Granite 4 3B copies text and reads keys aloud, LFM3 re-asks listed topics). The pipeline replaces a reply with no question, a copy of the previous one, or last turn's questions behind a new lead-in by two field-specific questions (`fallback_question`). Python picks **ASK_1 / ASK_2** (+ BACKUP) from open fields of the prior extract, skipping the fields asked last turn (`session.last_asked_fields`), so the model always asks two short questions and never repeats itself. Pace ≈5 substantive turns.
 
 ## Honest extract + agent end
 

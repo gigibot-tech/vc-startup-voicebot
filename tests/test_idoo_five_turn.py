@@ -15,6 +15,7 @@ from startup_voice.features.interview.pipeline import InterviewPipeline
 from startup_voice.features.interview.prompts import (
     DEFAULT_REPLY_SYSTEM,
     build_reply_prompt,
+    fallback_question,
     pick_reply_fields,
 )
 from startup_voice.features.sessions.store import FileSessionStore
@@ -400,11 +401,12 @@ def test_market_turn8_next_turn_moves_off_last_asked_fields():
     assert "ASK_1: planned round and target raise amount" in user_prompt
     assert "ASK_2: expected runway (months)" in user_prompt
     assert "market size" not in user_prompt.split("ALREADY_ANSWERED", 1)[0]
-    # Topics of the previous reply — never its text (Granite copied that verbatim).
-    assert "ASKED_LAST_TURN (founder is answering this now — do not ask it again): estimated market size" in user_prompt
+    # Nothing of the previous reply reaches the model: not its text (Granite copied that verbatim),
+    # not even its topics (LFM3 re-asked them).
+    assert "ASKED_LAST_TURN" not in user_prompt
     assert "Wie groß ist der Markt" not in user_prompt
     assert "NOT in dossier yet — credit this first!" in user_prompt
-    assert "Do not ask again about ASKED_LAST_TURN" in sys_prompt
+    assert "Never ask about ALREADY_ANSWERED" in sys_prompt
     assert session.last_asked_fields == ["financing.raise_amount_round", "financing.runway_milestones"]
 
     # Retry of the same turn keeps the same picks.
@@ -723,8 +725,7 @@ def test_repeat_guard_swaps_in_catalog_question(tmp_path: Path):
     session = pipe.process_turn(session, "Ach, keine Ahnung.")
     second = session.messages[-1].content
     assert second != first
-    slot = session.last_asked_fields[0].split(".")[0]
-    assert second == pipe.config().question_for(slot)
+    assert second == fallback_question(session)
 
 
 def test_split_reply_marks_strips_markers_anywhere_and_connector_debris():
@@ -817,5 +818,22 @@ def test_reply_without_any_question_becomes_the_catalog_question(tmp_path: Path)
     session = pipe.process_turn(session, "Wir bauen eine App.")
     reply = session.messages[-1].content
     assert "?" in reply
-    slot = session.last_asked_fields[0].split(".")[0]
-    assert reply == pipe.config().question_for(slot)
+    assert reply == fallback_question(session)
+
+
+def test_reworded_repeat_of_last_turns_questions_is_replaced():
+    """LFM3 1.7B turn 2: new lead-in, same questions as turn 1 → whole-message similarity missed it."""
+    from startup_voice.features.interview.prompts import repeats_question
+
+    prev = "Gute Nachricht – wir haben die MVP Seite auf Netlify. Wer sind die Gründer und welche Rolle haben sie? Und wie viele Monate Runway wollen Sie einplanen?"
+    again = "Wer sind die Gründer und welche Rollen haben sie? Und wie viele Monate Runway und welche Meilensteine erwartet ihr?"
+    assert repeats_question(again, prev)
+    assert not repeats_question("Wie groß ist der Markt?", prev)
+
+
+def test_fallback_question_is_field_specific_and_language_aware():
+    session = InterviewSession.create(language="de")
+    session.last_asked_fields = ["team.background_expertise", "market.market_size"]
+    assert fallback_question(session) == "Welchen Hintergrund und welche Erfahrung bringt ihr mit? Wie groß schätzt ihr den Markt?"
+    session.language = "en"
+    assert fallback_question(session).startswith("Could you tell me about founder background")

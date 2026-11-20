@@ -70,7 +70,9 @@ from startup_voice.features.interview.prompts import (
     end_allowed,
     field_hint,
     is_repeat,
+    fallback_question,
     previous_assistant_message,
+    repeats_question,
     recent_history,
     split_reply_marks,
 )
@@ -605,23 +607,21 @@ class InterviewPipeline:
     def _guard_repeat(
         self, session: InterviewSession, reply: str, *, previous: str, offer_end: bool = False
     ) -> str:
-        """Never say the previous assistant message again.
+        """Never leave a dead end and never ask the same thing twice.
 
-        Small models (Granite 4 3B) copy earlier assistant text from the prompt — once the
-        same reply came back word for word although the founder said something new. When
-        ``reply`` is ≥80 % the same as ``previous``, swap in the catalog question for the
-        slot this turn was meant to ask (``last_asked_fields[0]``).
+        Small models (Granite 4 3B, LFM3 1.7B) copy earlier assistant text, re-ask last turn's
+        questions behind a new lead-in, or only acknowledge. In those cases the reply is replaced
+        by ``fallback_question``: two precise questions for the topics Python picked this turn.
         """
-        asked = session.last_asked_fields or []
-        slot = asked[0].split(".", 1)[0] if asked else (session.evaluation.next_focus_slot or "team")
-        fallback = self.config().question_for(slot)  # type: ignore[arg-type]
-        # No question at all although fields are still open (and this is not a wrap-up): a small
-        # model chatted or only acknowledged. Ask the catalog question instead of leaving a dead end.
+        fallback = fallback_question(session) or self.config().question_for(
+            (session.evaluation.next_focus_slot or "team")  # type: ignore[arg-type]
+        )
+        # No question although fields are open (and this is no wrap-up).
         if "?" not in reply and not offer_end and not end_allowed(session):
             return fallback
-        if not is_repeat(reply, previous):
-            return reply
-        return fallback if not is_repeat(fallback, previous) else reply
+        if is_repeat(reply, previous) or repeats_question(reply, previous):
+            return fallback if not is_repeat(fallback, previous) else reply
+        return reply
 
     def _session_followup_mode(self, session: InterviewSession) -> str:
         """Prefer per-session setting; fall back to global config / default."""

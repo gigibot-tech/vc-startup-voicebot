@@ -175,7 +175,7 @@ const replyRulesBase = `
 YOUR TASK THIS TURN (the dossier is 1 turn behind 'Founder just said'):
 1) At most one short clause reacting to 'Founder just said' — in your own words, do not repeat what the founder said.
 2) Ask ASK_1 and ASK_2 as TWO short questions, one each. If 'Founder just said' already answers one of them (even roughly, or with 0 / none / noch nicht), ask BACKUP instead.
-3) Do not ask again about ASKED_LAST_TURN (unless RE_ASK says so) or ALREADY_ANSWERED.
+3) Never ask about ALREADY_ANSWERED.
 4) Write a NEW reply. Speak like a person: no lists, no field names, no technical keys, never mention other open topics, never write square brackets.
 Spoken, at most 2 sentences, no markdown.`;
 const replyLastRule = `
@@ -196,12 +196,10 @@ function promptFor(session, text, cfg) {
   } else {
     reAsk = open.length > 0 && open.every((k) => (session.last_asked_fields || []).includes(k));
     ({ asks, backup } = pickReplyFields(session));
-    session.prior_asked_fields = session.last_asked_fields || [];
     session.last_asked_fields = asks; session.last_asked_turn = session.turn_index;
   }
-  // !! Topics only — NEVER the previous assistant text or a transcript with assistant lines:
-  // Granite 4 3B copied that text verbatim as its next reply (old field list included).
-  const askedLastTurn = (session.prior_asked_fields || []).map(fieldHint).join("; ") || "none";
+  // !! NEVER show the previous assistant text, a transcript with assistant lines, or an "asked last turn"
+  // topic list: Granite copied the text verbatim, LFM3 re-asked the listed topics. Twin: build_reply_prompt.
   const answered = slots.flatMap((slot) => fields[slot]
     .filter((f) => String(session.objects?.[slot]?.fields?.[f] || "").trim())
     .map((f) => `${fieldHint(`${slot}.${f}`)}: ${String(session.objects[slot].fields[f]).trim().slice(0, 80)}`)).join("; ") || "none";
@@ -211,9 +209,8 @@ function promptFor(session, text, cfg) {
     `ASK_1: ${asks[0] ? fieldHint(asks[0]) : "none — every field is filled (wrap up + [[intake:end]])"}`,
     `ASK_2: ${asks[1] ? fieldHint(asks[1]) : "none"}`,
     `BACKUP (only if Founder just said already answers ASK_1 or ASK_2): ${backup ? fieldHint(backup) : "none"}`,
-    ...(reAsk ? ["RE_ASK: only the ASKED_LAST_TURN topics are still open — if 'Founder just said' does not answer them, ask once more, shorter and from a different angle."] : []),
+    ...(reAsk ? ["RE_ASK: the only open topics are the ones you just asked about — if 'Founder just said' does not answer them, ask once more, shorter and from a different angle."] : []),
     `ALREADY_ANSWERED (never re-ask): ${answered}`,
-    `ASKED_LAST_TURN (founder is answering this now — do not ask it again): ${askedLastTurn}`,
     `Founder just said (NOT in dossier yet — credit this first!): ${String(text || "").slice(0, 1200)}`,
   ].join("\n");
   return { system, user, focus: asks[0]?.split(".")[0] || "team" };
@@ -224,7 +221,7 @@ function promptFor(session, text, cfg) {
 // "…geben: Diese Felder…" behind (seen with Granite 4 3B). Twin: strip_field_leaks in prompts.py.
 const fieldKeyRe = /\b(?:team|product|traction|market|financing)\.[a-z]+(?:_[a-z]+)*\b/i;
 // Labels of OUR prompt that a small model sometimes echoes ("- ASK_1: team & background").
-const promptLabelRe = /\b(?:ASK_[12]|BACKUP|ALREADY_ANSWERED|ASKED_LAST_TURN|RE_ASK|OPEN_FIELDS_LEFT|FOLLOWUP_MODE)\b|Founder just said/;
+const promptLabelRe = /\b(?:ASK_[12]|BACKUP|ALREADY_ANSWERED|RE_ASK|OPEN_FIELDS_LEFT|FOLLOWUP_MODE)\b|Founder just said/;
 function stripFieldLeaks(text) {
   if (!text || !(fieldKeyRe.test(text) || promptLabelRe.test(text))) return text;
   const kept = [];
@@ -262,13 +259,45 @@ function endAllowed(session) {
   const open = openFieldKeys(session);
   return !open.length || open.every((k) => (session.last_asked_fields || []).includes(k));
 }
+// Deterministic German questions per field: the fallback when a small model returns no question or repeats one.
+// Precise on purpose (slot-wide catalog questions re-ask several fields). Twin: FIELD_QUESTIONS_DE in prompts.py.
+const fieldQuestionsDe = {
+  "team.founders_roles": "Wer gründet mit, und welche Rolle hat jede Person?",
+  "team.background_expertise": "Welchen Hintergrund und welche Erfahrung bringt ihr mit?",
+  "team.commitment_fulltime": "Arbeitet ihr Vollzeit am Projekt oder nebenher?",
+  "product.problem": "Welches Problem löst ihr, und für wen ist es besonders schmerzhaft?",
+  "product.solution": "Wie löst euer Produkt dieses Problem konkret?",
+  "product.stage_status": "Wo steht das Produkt gerade: Idee, Prototyp, MVP oder live?",
+  "product.usp_tech": "Was ist technisch das Besondere an eurem Produkt?",
+  "traction.customers_pilots": "Gibt es schon Nutzer, Piloten oder Absichtserklärungen? Null ist auch eine Antwort.",
+  "traction.metrics_revenue": "Welche Zahlen habt ihr schon, etwa Umsatz oder Nutzung? Null ist auch okay.",
+  "traction.growth_signal": "Wie entwickeln sich die Nutzer, und was ist das nächste Ziel?",
+  "market.target_icp": "Wer genau ist eure Zielgruppe?",
+  "market.market_size": "Wie groß schätzt ihr den Markt?",
+  "market.competitors_moat": "Wer sind eure Wettbewerber, und was schützt euch vor ihnen?",
+  "financing.raise_amount_round": "Welche Runde plant ihr, und wie viel Kapital braucht ihr?",
+  "financing.use_of_funds": "Wofür würdet ihr das Geld einsetzen?",
+  "financing.runway_milestones": "Wie viele Monate reicht das Geld, und welche Meilensteine wollt ihr erreichen?",
+};
+function fallbackQuestion(session) {
+  const keys = ((session.last_asked_fields || []).length ? session.last_asked_fields : openFieldKeys(session).slice(0, 2)).slice(0, 2);
+  const de = !/^en/i.test(session.language || "de");
+  return keys.map((k) => (de ? fieldQuestionsDe[k] : `Could you tell me about ${fieldHint(k)}?`)).filter(Boolean).join(" ");
+}
+const questionSentences = (text) => String(text || "").replace(/^\s*(?:\d+[.)]|[-*•])\s+/gm, "").split(/\s+/).join(" ").split(/(?<=[.!?…:])\s+/).filter((x) => x.trimEnd().endsWith("?"));
+// True when any question of `reply` is (almost) a question of `previous` — a new lead-in sentence hid a re-asked
+// question from the whole-message check. Twin: repeats_question in prompts.py.
+const repeatsQuestion = (reply, previous) => {
+  const old = questionSentences(previous).map((q) => q.toLowerCase());
+  return questionSentences(reply).some((q) => old.some((o) => similarity(q.toLowerCase(), o) >= 0.8));
+};
+// Never leave a dead end and never ask the same thing twice: no question although fields are open, a copy of the
+// previous message, or last turn's questions behind a new lead-in → two precise questions for this turn's topics.
 function guardRepeat(session, reply, cfg, previous = previousAssistant(session)) {
-  const slot = (session.last_asked_fields || [])[0]?.split(".")[0] || session.evaluation?.next_focus_slot || "team";
-  const fallback = cfg?.slot_questions?.[slot] || defaults.slot_questions[slot];
-  // No question although fields are open (and this is no wrap-up): ask the catalog question instead of a dead end.
+  const fallback = fallbackQuestion(session) || cfg?.slot_questions?.[session.evaluation?.next_focus_slot || "team"] || "";
   if (!reply.includes("?") && !endAllowed(session)) return fallback || reply;
-  if (similarity(reply, previous) < 0.8) return reply;
-  return fallback && similarity(fallback, previous) < 0.8 ? fallback : reply;
+  if (similarity(reply, previous) >= 0.8 || repeatsQuestion(reply, previous)) return fallback && similarity(fallback, previous) < 0.8 ? fallback : reply;
+  return reply;
 }
 const extractSystem = `You extract startup facts from a founder conversation. Return only valid JSON with shape {"updates":{"team":{"fields":{},"summary":"","evidence":[]},"product":{},"traction":{},"market":{},"financing":{}},"belege":{"team":0,"product":0,"traction":0,"market":0,"financing":0}}. Use only facts explicitly stated by the founder. Leave unknown fields empty. Each belege score is 0 to 1 and measures concrete evidence.`;
 function extractUser(session, latest) {
