@@ -377,11 +377,14 @@ function tidyReply(text, maxQuestions = 2, maxLead = 1) {
 }
 // Removes every [[dossier:…]] / [[intake:end]] marker wherever the model put it (LFM3 wrote "…[[dossier:yes]]
 // Then [[intake:end]]."), plus the connector debris left behind. Twin: split_reply_marks in prompts.py.
-function stripMarkers(value) {
+// Lead-in sentences kept in a reply from a BROWSER model: none (small models invent things in the
+// acknowledgement). Server models (streamTurn) keep one. Twin: BROWSER_REPLY_MAX_LEAD in prompts.py.
+const BROWSER_REPLY_MAX_LEAD = 0;
+function stripMarkers(value, maxLead = 1) {
   let text = String(value || "").replace(/\[\[\s*(?:dossier\s*:\s*(?:yes|no)|intake\s*:\s*end)\s*\]\]/gi, "").replace(/[ \t]{2,}/g, " ").trim();
   text = text.replace(/(?:\s*(?:→|->|=>|then|dann|und dann|und)\s*)+[.!]?\s*$/i, "").trim();
   const clean = stripFieldLeaks(text);
-  return tidyReply(clean) || clean;
+  return tidyReply(clean, 2, maxLead) || clean;
 }
 function parseJson(raw) { const text = String(raw || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""); try { return JSON.parse(text); } catch { const start = text.indexOf("{"); const end = text.lastIndexOf("}"); return start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : {}; } }
 // A denial a small model (LFM3 1.7B) copies into every field it cannot fill ("keine" in all of market.* and
@@ -389,6 +392,9 @@ function parseJson(raw) { const text = String(raw || "").trim().replace(/^```(?:
 // evidence has a founder quote that contains a denial; the rest is emptied. No topic keywords.
 // Twin: drop_copied_placeholders in src/startup_voice/features/dossier/review.py.
 const placeholderValues = new Set(["keine", "kein", "keiner", "keines", "nein", "nichts", "noch nicht", "keine angabe", "k.a.", "ka", "none", "no", "nothing", "not yet", "n/a", "na", "unknown", "unbekannt", "0", "null", "-", "–"]);
+// Words that mean "no information", never a founder fact (LFM3 wrote 'missing' into a field → it counted as
+// filled and was never asked again). Emptied always. Twin: _ABSENCE_VALUES in review.py.
+const absenceValues = new Set(["missing", "unset", "empty", "tbd", "todo", "?", "??", "unknown", "unbekannt", "n/a", "na", "k.a.", "not mentioned", "not stated", "not provided", "not specified", "nicht genannt", "nicht erwähnt", "nicht angegeben", "nicht bekannt", "keine angabe", "fehlt", "offen", "null", "none given"]);
 const denialTokenRe = /\b(?:kein\w*|nicht|nein|nichts|none|no|not|nothing|never|null)\b|\b0\b/i;
 const placeholderKey = (v) => String(v ?? "").trim().replace(/^[.,;:!"'()]+|[.,;:!"'()]+$/g, "").toLowerCase().split(/\s+/).filter(Boolean).join(" ");
 function dropCopiedPlaceholders(session, updates, minCopies = 3) {
@@ -396,7 +402,11 @@ function dropCopiedPlaceholders(session, updates, minCopies = 3) {
   for (const slot of slots) {
     const patch = updates[slot]; if (!patch || typeof patch !== "object") continue;
     const flds = patch.fields || patch;
-    for (const field of fields[slot]) { const n = placeholderKey(flds[field]); if (placeholderValues.has(n)) spots.push({ patch, flds, field, n }); }
+    for (const field of fields[slot]) {
+      const n = placeholderKey(flds[field]);
+      if (absenceValues.has(n)) flds[field] = "";
+      else if (placeholderValues.has(n)) spots.push({ patch, flds, field, n });
+    }
   }
   const counts = new Map(); for (const s of spots) counts.set(s.n, (counts.get(s.n) || 0) + 1);
   const founder = (session.messages || []).filter((m) => m.role === "user").map((m) => m.content).join(" ").toLowerCase().split(/\s+/).join(" ");
@@ -644,11 +654,11 @@ export default async function handler(request) {
       const p = promptFor(s, b.text, cfg); await saveSession(s); return json({ session: s, reply_system: p.system, reply_user: p.user, extract_system: extractSystem, extract_user: extractUser(s, b.text), reply_max_tokens: 500, extract_max_tokens: 1300 });
     }
     m = path.match(/^\/api\/sessions\/([^/]+)\/turn\/reply$/);
-    if (m && method === "POST") { const s = await loadSession(m[1]), b = await request.json(), reply = guardRepeat(s, stripMarkers(b.raw_reply), await loadConfig()); s.messages.push({ role: "assistant", content: reply, ts: new Date().toISOString(), warning: "" }); await saveSession(s); return json({ session: s, reply, needs_extract: true, offer_end: s.evaluation?.ready_for_closing || false }); }
+    if (m && method === "POST") { const s = await loadSession(m[1]), b = await request.json(), reply = guardRepeat(s, stripMarkers(b.raw_reply, BROWSER_REPLY_MAX_LEAD), await loadConfig()); s.messages.push({ role: "assistant", content: reply, ts: new Date().toISOString(), warning: "" }); await saveSession(s); return json({ session: s, reply, needs_extract: true, offer_end: s.evaluation?.ready_for_closing || false }); }
     m = path.match(/^\/api\/sessions\/([^/]+)\/turn\/commit$/);
-    if (m && method === "POST") { const s = await loadSession(m[1]), b = await request.json(); if (b.raw_reply && s.messages.at(-1)?.role !== "assistant") s.messages.push({ role: "assistant", content: guardRepeat(s, stripMarkers(b.raw_reply), await loadConfig()), ts: new Date().toISOString(), warning: "" }); mergeExtract(s, parseJson(b.raw_extract)); await saveSession(s); return json({ session: s, reply: s.messages.at(-1)?.content || "", needs_extract: true, offer_end: s.evaluation.ready_for_closing || s.evaluation.field_coverage >= 1 }); }
+    if (m && method === "POST") { const s = await loadSession(m[1]), b = await request.json(); if (b.raw_reply && s.messages.at(-1)?.role !== "assistant") s.messages.push({ role: "assistant", content: guardRepeat(s, stripMarkers(b.raw_reply, BROWSER_REPLY_MAX_LEAD), await loadConfig()), ts: new Date().toISOString(), warning: "" }); mergeExtract(s, parseJson(b.raw_extract)); await saveSession(s); return json({ session: s, reply: s.messages.at(-1)?.content || "", needs_extract: true, offer_end: s.evaluation.ready_for_closing || s.evaluation.field_coverage >= 1 }); }
     m = path.match(/^\/api\/sessions\/([^/]+)\/continue(?:\/prepare|\/commit)?$/);
-    if (m && method === "POST") { const s = await loadSession(m[1]), cfg = await loadConfig(), focus = s.evaluation?.next_focus_slot || "team", question = cfg.slot_questions[focus]; if (path.endsWith("/prepare")) return json({ reply_system: cfg.reply_system_prompt, reply_user: `In ${s.language === "en" ? "English" : "German"}, ask one short follow-up question about ${labels[focus]}. The question to use as a guide is: ${question}`, reply_max_tokens: 180 }); if (path.endsWith("/commit")) { const b = await request.json(); s.messages.push({ role: "assistant", content: guardRepeat(s, stripMarkers(b.raw_reply), cfg, [...s.messages].reverse().find((x) => x.role === "assistant")?.content || ""), ts: new Date().toISOString(), warning: "" }); await saveSession(s); return json({ session: s, reply: s.messages.at(-1).content }); } s.messages.push({ role: "assistant", content: question, ts: new Date().toISOString(), warning: "" }); await saveSession(s); return json({ session: s, reply: question }); }
+    if (m && method === "POST") { const s = await loadSession(m[1]), cfg = await loadConfig(), focus = s.evaluation?.next_focus_slot || "team", question = cfg.slot_questions[focus]; if (path.endsWith("/prepare")) return json({ reply_system: cfg.reply_system_prompt, reply_user: `In ${s.language === "en" ? "English" : "German"}, ask one short follow-up question about ${labels[focus]}. The question to use as a guide is: ${question}`, reply_max_tokens: 180 }); if (path.endsWith("/commit")) { const b = await request.json(); s.messages.push({ role: "assistant", content: guardRepeat(s, stripMarkers(b.raw_reply, BROWSER_REPLY_MAX_LEAD), cfg, [...s.messages].reverse().find((x) => x.role === "assistant")?.content || ""), ts: new Date().toISOString(), warning: "" }); await saveSession(s); return json({ session: s, reply: s.messages.at(-1).content }); } s.messages.push({ role: "assistant", content: question, ts: new Date().toISOString(), warning: "" }); await saveSession(s); return json({ session: s, reply: question }); }
     m = path.match(/^\/api\/sessions\/([^/]+)\/extract(?:\/(prepare|commit))?$/);
     if (m && method === "POST") { const s = await loadSession(m[1]); if (m[1] && path.endsWith("/prepare")) return json({ focus: s.evaluation?.next_focus_slot || "team", extract_system: extractSystem, extract_user: extractUser(s, ""), extract_max_tokens: 1300 }); const b = m[2] === "commit" ? await request.json() : null; const raw = b?.raw_extract ?? await complete(extractSystem, extractUser(s, ""), { jsonMode: true, maxTokens: 1300 }); mergeExtract(s, parseJson(raw)); await saveSession(s); return json({ session: s, offer_end: s.evaluation.ready_for_closing || s.evaluation.field_coverage >= 1 }); }
     m = path.match(/^\/api\/sessions\/([^/]+)\/finalize$/);

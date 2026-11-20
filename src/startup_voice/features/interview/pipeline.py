@@ -63,6 +63,7 @@ from startup_voice.features.interview.prompts import (
     EXTRACT_DELTA_SYSTEM,
     EXTRACT_SYSTEM,
     SCORE_BELEGE_SYSTEM,
+    BROWSER_REPLY_MAX_LEAD,
     SUMMARY_SYSTEM,
     build_extract_user,
     build_reply_prompt,
@@ -330,7 +331,7 @@ class InterviewPipeline:
         self, session: InterviewSession, raw_reply: str
     ) -> tuple[InterviewSession, str]:
         """Persist a browser- or server-produced continue question."""
-        question, _, _ = split_reply_marks(raw_reply)
+        question, _, _ = split_reply_marks(raw_reply, max_lead=BROWSER_REPLY_MAX_LEAD)
         if not question:
             raise RuntimeError("LLM returned empty follow-up question")
         question = self._guard_repeat(
@@ -390,7 +391,7 @@ class InterviewPipeline:
         self, session: InterviewSession, raw_reply: str
     ) -> tuple[InterviewSession, str, bool]:
         """Persist the spoken reply right after Call #1 (before browser Call #2 extract runs)."""
-        reply, _mark_extract, offer_end = split_reply_marks(raw_reply)
+        reply, _mark_extract, offer_end = split_reply_marks(raw_reply, max_lead=BROWSER_REPLY_MAX_LEAD)
         offer_end = offer_end and end_allowed(session)  # a small model's [[intake:end]] may be premature
         if not reply:
             raise RuntimeError("LLM returned empty reply")

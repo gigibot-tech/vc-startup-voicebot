@@ -300,6 +300,14 @@ _PLACEHOLDER_VALUES = frozenset({
     "keine", "kein", "keiner", "keines", "nein", "nichts", "noch nicht", "keine angabe", "k.a.", "ka",
     "none", "no", "nothing", "not yet", "n/a", "na", "unknown", "unbekannt", "0", "null", "-", "–",
 })
+# Words that mean "no information", never a founder fact. LFM3 wrote 'missing' (from the schema's
+# missing_or_vague) into team.commitment_fulltime: the field then counted as filled and was never
+# asked again, not even when the founder answered it. Dropped always, one occurrence is enough.
+_ABSENCE_VALUES = frozenset({
+    "missing", "unset", "empty", "tbd", "todo", "?", "??", "unknown", "unbekannt", "n/a", "na", "k.a.",
+    "not mentioned", "not stated", "not provided", "not specified", "nicht genannt", "nicht erwähnt",
+    "nicht angegeben", "nicht bekannt", "keine angabe", "fehlt", "offen", "null", "none given",
+})
 _DENIAL_TOKEN_RE = re.compile(r"\b(?:kein\w*|nicht|nein|nichts|none|no|not|nothing|never|null)\b|\b0\b", re.IGNORECASE)
 
 
@@ -318,16 +326,19 @@ def drop_copied_placeholders(
     again). Returns how many fields were emptied.
     """
     spots: list[tuple[dict[str, Any], str, str]] = []
+    emptied = 0
     for payload in updates.values():
         if not isinstance(payload, dict) or not isinstance(payload.get("fields"), dict):
             continue
         for key, val in payload["fields"].items():
             norm = _placeholder_key(val)
-            if norm in _PLACEHOLDER_VALUES:
+            if norm in _ABSENCE_VALUES:
+                payload["fields"][key] = ""
+                emptied += 1
+            elif norm in _PLACEHOLDER_VALUES:
                 spots.append((payload, key, norm))
     counts = Counter(norm for _, _, norm in spots)
     founder = _message_blob(session, "user").lower()
-    emptied = 0
     for payload, key, norm in spots:
         if counts[norm] < min_copies:
             continue

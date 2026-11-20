@@ -152,7 +152,14 @@ _ANY_MARK_RE = re.compile(
 _MARK_DEBRIS_RE = re.compile(r"(?:\s*(?:→|->|=>|then|dann|und dann|und)\s*)+[.!]?\s*$", re.IGNORECASE)
 
 
-def split_reply_marks(raw: str) -> tuple[str, bool, bool]:
+# Lead-in sentences kept in a reply from a BROWSER model (Granite 3B / LFM3 1.7B / Gemma): none.
+# The acknowledgement is where small models invent things ("ich habe … notiert", "ehre dich als
+# Alleineinsteiger"); two questions are safe. Server models (Ollama, Scaleway) keep one lead-in.
+# Set to 1 to let browser models acknowledge again.
+BROWSER_REPLY_MAX_LEAD = 0
+
+
+def split_reply_marks(raw: str, *, max_lead: int = 1) -> tuple[str, bool, bool]:
     """Strip every ``[[dossier:…]]`` / ``[[intake:end]]`` marker, wherever the model put it.
 
     Returns ``(spoken_text, needs_extract, offer_end)``.
@@ -172,7 +179,8 @@ def split_reply_marks(raw: str) -> tuple[str, bool, bool]:
     text = _ANY_MARK_RE.sub("", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = _MARK_DEBRIS_RE.sub("", text.strip()).strip()
-    return tidy_reply(strip_field_leaks(text)) or strip_field_leaks(text), needs_extract, offer_end
+    cleaned = strip_field_leaks(text)
+    return tidy_reply(cleaned, max_lead=max_lead) or cleaned, needs_extract, offer_end
 
 
 def end_allowed(session: InterviewSession) -> bool:

@@ -857,3 +857,22 @@ def test_english_reply_in_a_german_session_becomes_the_german_fallback(tmp_path:
     session, _ = pipe.start_session(language="de")
     session = pipe.process_turn(session, "Ich bin der Gründer.")
     assert session.messages[-1].content == fallback_question(session)
+
+
+def test_browser_replies_have_no_lead_in_but_server_replies_keep_one(tmp_path: Path):
+    """Small browser models invent things in the acknowledgement ('ich habe … notiert')."""
+    from startup_voice.features.interview.prompts import split_reply_marks
+
+    raw = "Ich habe dich als Alleineinsteiger notiert. Wer gründet mit? Wie weit ist das Produkt?"
+    assert split_reply_marks(raw, max_lead=0)[0] == "Wer gründet mit? Wie weit ist das Produkt?"
+    assert split_reply_marks(raw)[0].startswith("Ich habe dich als Alleineinsteiger notiert.")
+
+    class LeadLLM:
+        def complete(self, system, user, *, max_tokens=None, json_mode=False):
+            return "Gute Nachricht, das klingt spannend. Wer gründet mit? Wie weit ist das Produkt?"
+
+    pipe = InterviewPipeline(LeadLLM(), FileSessionStore(tmp_path))
+    session, _ = pipe.start_session(language="de")
+    session.turn_index = 1
+    session, reply, _ = pipe.commit_client_reply(session, LeadLLM().complete("", ""))  # browser path
+    assert reply == "Wer gründet mit? Wie weit ist das Produkt?"

@@ -504,7 +504,8 @@ def test_commit_client_turn_applies_extract(tmp_path: Path):
     session, reply, offer_end = pipe.commit_client_turn(
         session, raw_reply=raw_reply, raw_extract=raw_extract
     )
-    assert reply == "Danke. Wie groß ist der Markt?"
+    # Browser-model path: the lead-in ("Danke.") is dropped (BROWSER_REPLY_MAX_LEAD = 0).
+    assert reply == "Wie groß ist der Markt?"
     assert session.messages[-1].role == "assistant"
     assert session.messages[-1].content == reply
     assert "Vollzeit" in (session.objects["team"].fields.get("commitment_fulltime") or "")
@@ -547,8 +548,8 @@ def test_api_prepare_commit_roundtrip(tmp_path: Path, monkeypatch):
     )
     assert commit.status_code == 200
     data = commit.json()
-    assert data["reply"] == "Danke. Nächste Frage?"
-    assert data["session"]["messages"][-1]["content"] == "Danke. Nächste Frage?"
+    assert data["reply"] == "Nächste Frage?"  # browser-model path drops the lead-in
+    assert data["session"]["messages"][-1]["content"] == "Nächste Frage?"
     assert "Zwei Gründer" in (data["session"]["objects"]["team"]["summary"] or "")
 
 

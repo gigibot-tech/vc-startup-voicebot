@@ -209,3 +209,15 @@ def test_a_single_honest_denial_is_kept():
     updates = {"traction": {"fields": {"metrics_revenue": "keine"}, "evidence": []}}
     assert drop_copied_placeholders(session, updates) == 0
     assert updates["traction"]["fields"]["metrics_revenue"] == "keine"
+
+
+def test_schema_words_are_never_stored_as_a_value():
+    """LFM3 1.7B wrote 'missing' into team.commitment_fulltime → counted as filled, never asked again."""
+    from startup_voice.domain import InterviewSession
+    from startup_voice.features.dossier.review import apply_extract_updates
+
+    session = InterviewSession.create(language="de")
+    updates = {"team": {"fields": {"founders_roles": "Gründer", "commitment_fulltime": "missing"}, "evidence": []}}
+    apply_extract_updates(session, updates, {}, turn=1)
+    assert session.objects["team"].fields["founders_roles"] == "Gründer"
+    assert session.objects["team"].fields.get("commitment_fulltime", "") == ""
