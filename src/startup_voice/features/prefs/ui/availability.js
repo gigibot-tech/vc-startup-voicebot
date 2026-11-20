@@ -44,7 +44,13 @@ export function applyAvailability({ prefs, health, hostname, doc = globalThis.do
     provider: health?.llm_provider, model: health?.llm_model, dev, lang: prefs.lang || "de",
   });
   const llmOpt = doc?.querySelector?.('#llmSel option[value="ollama"]');
-  if (llmOpt) { llmOpt.textContent = llm.label; llmOpt.disabled = llm.disabled; }
+  if (llmOpt) {
+    llmOpt.textContent = llm.label; llmOpt.disabled = llm.disabled;
+    // Names (never values) of the server variables that are missing: makes "why is it not selectable"
+    // answerable from the page and from /health without access to the Netlify settings.
+    const missing = Array.isArray(health?.llm_missing) ? health.llm_missing : [];
+    llmOpt.title = missing.length ? `${String(prefs.lang || "de").startsWith("de") ? "Fehlt auf dem Server" : "Missing on the server"}: ${missing.join(", ")}` : "";
+  }
   if (llm.disabled && prefs.llm === "ollama") { prefs.llm = BROWSER_LLM_DEFAULT; changed = true; }
 
   const providers = Array.isArray(health?.stt_providers) ? health.stt_providers : [];

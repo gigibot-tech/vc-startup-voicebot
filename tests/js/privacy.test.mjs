@@ -7,7 +7,7 @@ const by = (items, key) => items.find((i) => i.key === key);
 
 test("everything in the browser: three green locks", () => {
   const items = describePrivacy({ prefs: { llm: "lfm3-1.7b", tts: "local", stt: "whisper", lang: "de" }, health: {}, hostname: "x.netlify.app" });
-  assert.deepEqual(items.map((i) => [i.key, i.level, i.icon]), [["llm", "local", "lock"], ["tts", "local", "lock"], ["stt", "local", "lock"]]);
+  assert.deepEqual(items.map((i) => [i.key, i.level, i.icon]), [["tts", "local", "lock"], ["stt", "local", "lock"], ["llm", "local", "lock"]]);
 });
 
 test("Scaleway is an EU flag (not red), the browser speech API and ElevenLabs are red", () => {

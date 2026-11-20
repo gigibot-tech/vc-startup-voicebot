@@ -1,5 +1,5 @@
 /**
- * Privacy badges in the header (next to "Einstellungen"): for each of the three services that touch
+ * Privacy lines in the header, stacked on the left of the "Einstellungen" button (TTS / STT / LLM): for each of the three services that touch
  * the founder's words — LLM (text), TTS (voice out), STT (voice in) — where does the data go?
  *
  *   local  green lock   runs on this device (browser model / Whisper / local Ollama): nothing leaves it
@@ -97,9 +97,9 @@ export function describePrivacy({ prefs, health = null, hostname = "" }) {
   const de = String(prefs.lang || "de").startsWith("de");
   const dev = isDevHost(hostname);
   return [
-    { key: "llm", label: "LLM", ...describeLlm({ prefs, health, dev, de }) },
     { key: "tts", label: "TTS", ...describeTts({ prefs, de }) },
     { key: "stt", label: "STT", ...describeStt({ prefs, de }) },
+    { key: "llm", label: "LLM", ...describeLlm({ prefs, health, dev, de }) },
   ];
 }
 

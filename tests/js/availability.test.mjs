@@ -33,6 +33,12 @@ test("Scaleway gets its own label; an unconfigured server LLM is disabled (fail 
   assert.doesNotMatch(serverLlmOption({ provider: "openai_compatible", dev: false }).label, /OpenAI/);
 });
 
+test("the disabled server option names the missing server variables in its tooltip", () => {
+  const doc = fakeDoc([['#llmSel option[value="ollama"]', "Ollama"]]);
+  applyAvailability({ prefs: { llm: "ollama", lang: "de" }, health: { llm_provider: "none", llm_missing: ["LLM_PROVIDER"] }, hostname: "x.netlify.app", doc });
+  assert.equal(doc.opts['#llmSel option[value="ollama"]'].title, "Fehlt auf dem Server: LLM_PROVIDER");
+});
+
 test("deployed without a server LLM: the reply model moves to the browser one", () => {
   const doc = fakeDoc([['#llmSel option[value="ollama"]', "Ollama"]]);
   const prefs = { llm: "ollama", lang: "de" };
