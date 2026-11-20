@@ -24,6 +24,7 @@ import { createVoiceSwitch } from "./features/voice/voice-mode.js";
 import { createMicListener, resampleTo16k } from "./features/voice/browser-listen.js";
 import { describeModelBanner } from "./features/prefs/tech-status.js";
 import { applyAvailability } from "./features/prefs/availability.js";
+import { describePrivacy, renderPrivacyBadges } from "./features/prefs/privacy.js";
 import { createWebSpeechListener, isWebSpeechSupported } from "./features/voice/web-speech-listen.js";
 import { createCues } from "./features/voice/cues.js";
 import { createIdoBridge } from "./features/ido/ido-bridge.js";
@@ -123,9 +124,16 @@ const sessions = createSessions({
 });
 const chat = createChat({ voice, sessions });
 const configEditor = createConfigEditor({ sessions });
+/** Header chips: where does the data of LLM / TTS / STT go (local lock, EU flag, red flag)? */
+let lastHealth = null;
+function paintPrivacy() {
+  renderPrivacyBadges($("privacyBadges"), describePrivacy({ prefs, health: lastHealth, hostname: location.hostname }), {
+    onClick: () => $("prefsToggle")?.click(), // a chip opens Settings, where the choice can be changed
+  });
+}
 const settings = createSettings({
   voice,
-  onMetaChange: () => showMeta(),
+  onMetaChange: () => { showMeta(); paintPrivacy(); },
   onLanguageChange: async (langBcp47) => {
     const s = activeSession();
     if (!s) return;
@@ -427,6 +435,7 @@ async function boot() {
     await configEditor.load();
     try {
       const health = await api("/health");
+      lastHealth = health;
       voice.setProviders(Array.isArray(health.stt_providers) && health.stt_providers.length
         ? health.stt_providers
         : [health.stt || "browser"]);
@@ -444,6 +453,7 @@ async function boot() {
         savePrefs();
       }
       if (applyAvailability({ prefs, health, hostname: location.hostname })) { savePrefs(); settings.paint(); }
+      paintPrivacy();
       voice.applySttProvider();
       settings.syncToneUi();
       serverVoiceMode = health.voice_mode || "classic";
@@ -456,6 +466,7 @@ async function boot() {
         savePrefs();
       }
       voice.applySttProvider();
+      paintPrivacy(); // /health unavailable: still show the chips (LLM country then unknown)
     }
     const list = await sessions.refreshPicker();
     const fromUrl = initialUrlSessionId || readUrlSessionId();

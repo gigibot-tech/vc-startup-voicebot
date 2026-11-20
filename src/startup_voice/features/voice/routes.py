@@ -101,6 +101,23 @@ class VoiceJoinBody(BaseModel):
     stt: str = "server"
 
 
+def _llm_region() -> str:
+    """Where the server's reply model runs: ``LOCAL`` (this machine), an ISO country code, or "" (unknown).
+
+    Scaleway is French. Ollama is local. An OpenAI-compatible host is local when its URL points at this
+    machine; otherwise the operator states the country with ``LLM_REGION`` (e.g. ``DE`` for IONOS).
+    """
+    provider = (os.getenv("LLM_PROVIDER") or "ollama").strip().lower()
+    if provider == "scaleway":
+        return "FR"
+    if provider == "ollama":
+        return "LOCAL"
+    host = (os.getenv("LLM_BASE_URL") or "").split("//")[-1].split("/")[0].split(":")[0].lower()
+    if host in {"localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0"}:
+        return "LOCAL"
+    return (os.getenv("LLM_REGION") or "").strip().upper()
+
+
 def build_router(*, registry: SessionRegistry) -> APIRouter:
     router = APIRouter(tags=["voice"])
     stt_router = get_router()
@@ -121,6 +138,8 @@ def build_router(*, registry: SessionRegistry) -> APIRouter:
             # which reply model the server runs (Settings hides Ollama on a deployed URL)
             "llm_provider": (os.getenv("LLM_PROVIDER") or "ollama").strip().lower(),
             "llm_model": (os.getenv("LLM_MODEL") or "").strip(),
+            # where the reply model runs, for the header privacy chips: "LOCAL", an ISO country code, or ""
+            "llm_region": _llm_region(),
             "stt": default_provider(),
             "stt_providers": available_providers(),
             "voice_settings": default_voice_settings(),

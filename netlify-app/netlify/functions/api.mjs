@@ -593,7 +593,7 @@ export default async function handler(request) {
     if (path === "/health" && method === "GET") {
       const sessions = await listSessions();
       const speechReady = Boolean(process.env.ELEVENLABS_API_KEY);
-      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], ...(() => { const c = llmConfig(); return c.missing.length ? { llm_provider: "none", llm_model: "" } : { llm_provider: c.provider, llm_model: c.model }; })(), voice_settings: {}, voice_modes: ["classic"], voice_mode: "classic" });
+      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], ...(() => { const c = llmConfig(); return c.missing.length ? { llm_provider: "none", llm_model: "", llm_region: "" } : { llm_provider: c.provider, llm_model: c.model, llm_region: c.provider === "scaleway" ? "FR" : String(process.env.LLM_REGION || "").trim().toUpperCase() }; })(), voice_settings: {}, voice_modes: ["classic"], voice_mode: "classic" });
     }
     if (path === "/api/dossier-schema" && method === "GET") return json(schemaResponse());
     if (path === "/api/ido/config" && method === "GET") return json({ origins: String(process.env.IDO_ORIGINS || "").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean) });

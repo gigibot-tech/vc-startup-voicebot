@@ -202,3 +202,22 @@ def test_join_route_passes_stt_through(client, monkeypatch):
     sid = client.post("/api/sessions").json()["session"]["id"]
     body = client.post("/api/voice/join", json={"mode": "livekit", "session_id": sid, "stt": "browser"}).json()
     assert json.loads(_jwt_parts(body["token"])[1]["metadata"])["stt"] == "browser"
+
+
+def test_health_reports_where_the_llm_runs(monkeypatch):
+    """Header privacy chips: LOCAL / ISO country / unknown, never the URL itself."""
+    from startup_voice.features.voice.routes import _llm_region
+
+    cases = [
+        ({"LLM_PROVIDER": "scaleway"}, "FR"),
+        ({"LLM_PROVIDER": "ollama"}, "LOCAL"),
+        ({"LLM_PROVIDER": "openai_compatible", "LLM_BASE_URL": "http://127.0.0.1:8000/v1"}, "LOCAL"),
+        ({"LLM_PROVIDER": "openai_compatible", "LLM_BASE_URL": "https://host.example/v1", "LLM_REGION": "de"}, "DE"),
+        ({"LLM_PROVIDER": "openai_compatible", "LLM_BASE_URL": "https://host.example/v1"}, ""),
+    ]
+    for env, expected in cases:
+        for name in ("LLM_PROVIDER", "LLM_BASE_URL", "LLM_REGION"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        assert _llm_region() == expected, env
