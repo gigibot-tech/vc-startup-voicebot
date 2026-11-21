@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,6 +51,41 @@ const lazyStore = (name) => {
 const sessionBlobs = isNetlify ? lazyStore("startup-voice-sessions") : null;
 const configBlobs = isNetlify ? lazyStore("startup-voice-config") : null;
 const boardBlobs = isNetlify ? lazyStore("startup-voice-board") : null;
+
+// ---- LiveKit (hands-free call). This function only mints the join token and checks the credentials;
+// the voice worker that listens/speaks is a separate always-on process (it cannot run on Netlify).
+const lkEnv = () => ({ url: (process.env.LIVEKIT_URL || "").trim(), key: (process.env.LIVEKIT_API_KEY || "").trim(), secret: (process.env.LIVEKIT_API_SECRET || "").trim() });
+const lkMissing = () => { const e = lkEnv(); return [["LIVEKIT_URL", e.url], ["LIVEKIT_API_KEY", e.key], ["LIVEKIT_API_SECRET", e.secret]].filter(([, v]) => !v).map(([k]) => k); };
+const b64url = (buf) => Buffer.from(buf).toString("base64url");
+function lkToken(claims) {
+  const { key, secret } = lkEnv(), now = Math.floor(Date.now() / 1000);
+  const body = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" })) + "." + b64url(JSON.stringify({ iss: key, nbf: now, exp: now + 3600, ...claims }));
+  return `${body}.${b64url(createHmac("sha256", secret).update(body).digest())}`;
+}
+let lkCache = { at: 0, result: null };
+/** Ask LiveKit whether URL + key + secret work (read-only ListRooms). Never returns the secret. */
+async function lkCheck(force = false) {
+  if (!force && lkCache.result && Date.now() - lkCache.at < 300000) return lkCache.result;
+  const done = (result) => {
+    lkCache = { at: Date.now(), result };
+    if (result.valid === false) console.error(`LiveKit credentials problem: ${result.problem} - ${result.hint}`);
+    return result;
+  };
+  const missing = lkMissing();
+  if (missing.length) return done({ configured: false, valid: false, problem: "missing", hint: `Set ${missing.join(", ")} in the Netlify environment variables (scope: Functions / Runtime).` });
+  const { url, key } = lkEnv();
+  if (!/^wss?:\/\//.test(url)) return done({ configured: true, valid: false, problem: "url", hint: "LIVEKIT_URL must start with wss:// (e.g. wss://<project>.livekit.cloud)." });
+  try {
+    const res = await fetch(`${url.replace(/^wss:/, "https:").replace(/^ws:/, "http:").replace(/\/$/, "")}/twirp/livekit.RoomService/ListRooms`, {
+      method: "POST", headers: { authorization: `Bearer ${lkToken({ sub: "credential-check", video: { roomList: true } })}`, "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(4000),
+    });
+    if (res.ok) return done({ configured: true, valid: true, problem: "", hint: "", key_prefix: key.slice(0, 4) });
+    if (res.status === 401 || res.status === 403) return done({ configured: true, valid: false, problem: "rejected", key_prefix: key.slice(0, 4), hint: "LiveKit rejected LIVEKIT_API_KEY / LIVEKIT_API_SECRET (wrong pair, a stray space or quote, or they belong to another project than LIVEKIT_URL)." });
+    return done({ configured: true, valid: null, problem: `http ${res.status}`, hint: `LiveKit answered HTTP ${res.status}; check LIVEKIT_URL.` });
+  } catch (e) {
+    return done({ configured: true, valid: null, problem: "unreachable", hint: `Could not reach LiveKit: ${e.name}.` });
+  }
+}
 
 function json(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", ...headers } });
@@ -593,11 +628,25 @@ export default async function handler(request) {
     if (path === "/health" && method === "GET") {
       const sessions = await listSessions();
       const speechReady = Boolean(process.env.ELEVENLABS_API_KEY);
-      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], ...(() => { const c = llmConfig(); return c.missing.length ? { llm_provider: "none", llm_model: "", llm_region: "", llm_missing: c.missing } : { llm_provider: c.provider, llm_model: c.model, llm_region: c.provider === "scaleway" ? "FR" : String(process.env.LLM_REGION || "").trim().toUpperCase() }; })(), voice_settings: {}, voice_modes: ["classic"], voice_mode: "classic" });
+      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], ...(() => { const c = llmConfig(); return c.missing.length ? { llm_provider: "none", llm_model: "", llm_region: "", llm_missing: c.missing } : { llm_provider: c.provider, llm_model: c.model, llm_region: c.provider === "scaleway" ? "FR" : String(process.env.LLM_REGION || "").trim().toUpperCase() }; })(), voice_settings: {}, voice_modes: lkMissing().length ? ["classic"] : ["classic", "livekit"], voice_mode: "classic" });
     }
     if (path === "/api/dossier-schema" && method === "GET") return json(schemaResponse());
     if (path === "/api/ido/config" && method === "GET") return json({ origins: String(process.env.IDO_ORIGINS || "").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean) });
-    if (path === "/api/voice/transports" && method === "GET") return json({ default: "classic", transports: [{ id: "classic", available: true }] });
+    if (path === "/api/voice/transports" && method === "GET") {
+      const missing = lkMissing(), check = missing.length ? null : await lkCheck();
+      const bad = missing.length > 0 || check.valid === false;
+      return json({ default: "classic", transports: [{ id: "classic", name: "classic", available: true }, { id: "livekit", name: "livekit", available: !bad, reason: missing.length ? `missing ${missing.join(", ")}` : (check.valid === false ? check.hint : "") }] });
+    }
+    if (path === "/api/voice/livekit-check" && method === "GET") return json(await lkCheck(true));
+    if (path === "/api/voice/join" && method === "POST") {
+      const b = await request.json().catch(() => ({}));
+      if (lkMissing().length) return error(`LiveKit is not configured: missing ${lkMissing().join(", ")}`, 503);
+      if (String(b.mode || "livekit") !== "livekit") return error("Unknown voice mode", 400);
+      await loadSession(String(b.session_id || "")); // 404 for an unknown session
+      const room = `intake-${b.session_id}-${randomBytes(3).toString("hex")}`, identity = `founder-${randomBytes(4).toString("hex")}`;
+      const metadata = JSON.stringify({ session_id: b.session_id, language: String(b.language || "de").slice(0, 2).toLowerCase(), voice: b.voice || {}, stt: b.stt === "browser" ? "browser" : "server" });
+      return json({ mode: "livekit", url: lkEnv().url, token: lkToken({ sub: identity, name: "Founder", metadata, video: { room, roomJoin: true, canPublish: true, canSubscribe: true, canPublishData: true } }), room, identity, ttl_s: 3600 });
+    }
     if (path === "/api/voice/preflight" && method === "POST") {
       const body = await request.json().catch(() => ({})), hasKey = Boolean(process.env.ELEVENLABS_API_KEY), want = body.stt === "browser" ? "browser" : (hasKey ? "elevenlabs" : "browser");
       const stt = { ok: want === "browser" || hasKey, provider: want, fallback: want === "browser" ? "browser" : undefined, errors: [] };

@@ -71,4 +71,21 @@ else
   echo "! auto-reload off"
 fi
 echo "→ http://127.0.0.1:$PORT/"
-exec uv run startup-voice "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"
+
+# The hands-free (LiveKit) mode needs the voice worker, a SEPARATE process that listens and speaks.
+# Nothing started it before, so "Live-Gespräch" waited 15 s and said the agent did not answer.
+# Start it next to the app when LiveKit is configured; it stops together with this script.
+WORKER_PID=""
+if [ -n "$LK_URL" ]; then
+  if pgrep -f "startup-voice-agent (dev|start)" >/dev/null 2>&1; then
+    ok "LiveKit voice worker already running"
+  else
+    mkdir -p data
+    uv run --extra livekit-voice startup-voice-agent dev >data/livekit-worker.log 2>&1 &
+    WORKER_PID=$!
+    ok "LiveKit voice worker started (log: data/livekit-worker.log)"
+  fi
+fi
+cleanup() { [ -n "$WORKER_PID" ] && kill "$WORKER_PID" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+uv run startup-voice "${PASS_ARGS[@]+"${PASS_ARGS[@]}"}"

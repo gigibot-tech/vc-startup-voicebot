@@ -153,6 +153,13 @@ def build_router(*, registry: SessionRegistry) -> APIRouter:
         """Every voice mode with ``available`` + a ``reason`` when it is not (for Settings)."""
         return {"default": default_mode(), "transports": describe_all()}
 
+    @router.get("/api/voice/livekit-check")
+    def livekit_check() -> dict:
+        """Does LiveKit accept our URL + key + secret? (never returns the secret)"""
+        from startup_voice.features.voice.transports.livekit import check_credentials
+
+        return check_credentials(force=True)
+
     @router.post("/api/voice/join")
     def voice_join(body: VoiceJoinBody) -> dict:
         """[Sprechen] in a non-classic mode - client config to start the call for one session.

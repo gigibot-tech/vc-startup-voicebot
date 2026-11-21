@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import hmac
 import json
 import os
@@ -21,6 +22,7 @@ from typing import Any
 
 from startup_voice.features.voice.transports.base import TransportUnavailable
 
+log = logging.getLogger("startup-voice.livekit")
 _ENV = ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET")
 _TOKEN_TTL_S = 60 * 60
 
@@ -67,6 +69,72 @@ def mint_token(
     return f"{signing_input}.{_b64url(sig)}"
 
 
+def _http_base(url: str) -> str:
+    """wss://x.livekit.cloud -> https://x.livekit.cloud (the server API speaks HTTP)."""
+    url = url.strip().rstrip("/")
+    for ws, http in (("wss://", "https://"), ("ws://", "http://")):
+        if url.startswith(ws):
+            return http + url[len(ws):]
+    return url
+
+
+_CHECK_TTL_S = 300.0
+_check_cache: dict[str, Any] = {"at": 0.0, "result": None}
+
+
+def check_credentials(*, force: bool = False, timeout: float = 4.0) -> dict[str, Any]:
+    """Ask LiveKit itself whether URL + key + secret work (a signed, read-only ``ListRooms``).
+
+    Returns ``{configured, valid, problem, hint}`` and never the secret. ``valid`` is True / False when
+    LiveKit answered, None when it could not be reached (offline: not a credentials problem).
+    A wrong key or secret is logged as an error, so it shows up in the server / function log.
+    """
+    import httpx  # imported here: the web app itself needs no LiveKit packages
+
+    now = time.monotonic()
+    if not force and _check_cache["result"] is not None and now - _check_cache["at"] < _CHECK_TTL_S:
+        return _check_cache["result"]
+
+    def done(result: dict[str, Any]) -> dict[str, Any]:
+        _check_cache.update(at=now, result=result)
+        if result["valid"] is False:
+            log.error("LiveKit credentials problem: %s - %s", result["problem"], result["hint"])
+        return result
+
+    missing = _missing()
+    if missing:
+        return done({"configured": False, "valid": False, "problem": "missing",
+                     "hint": f"Set {', '.join(missing)}."})
+    url = os.environ["LIVEKIT_URL"].strip()
+    key = os.environ["LIVEKIT_API_KEY"].strip()
+    secret = os.environ["LIVEKIT_API_SECRET"].strip()
+    if not url.startswith(("wss://", "ws://")):
+        return done({"configured": True, "valid": False, "problem": "url",
+                     "hint": "LIVEKIT_URL must start with wss:// (e.g. wss://<project>.livekit.cloud)."})
+    issued = int(time.time())
+    claims = {"iss": key, "sub": "credential-check", "nbf": issued, "exp": issued + 60, "video": {"roomList": True}}
+    header = {"alg": "HS256", "typ": "JWT"}
+    signing = ".".join(_b64url(json.dumps(p, separators=(",", ":")).encode()) for p in (header, claims))
+    token = f"{signing}.{_b64url(hmac.new(secret.encode(), signing.encode('ascii'), hashlib.sha256).digest())}"
+    try:
+        res = httpx.post(
+            f"{_http_base(url)}/twirp/livekit.RoomService/ListRooms",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            content=b"{}", timeout=timeout,
+        )
+    except httpx.HTTPError as exc:
+        return done({"configured": True, "valid": None, "problem": "unreachable",
+                     "hint": f"Could not reach {_http_base(url)}: {exc.__class__.__name__}."})
+    if res.status_code == 200:
+        return done({"configured": True, "valid": True, "problem": "", "hint": ""})
+    if res.status_code in (401, 403):
+        return done({"configured": True, "valid": False, "problem": "rejected",
+                     "hint": "LiveKit rejected LIVEKIT_API_KEY / LIVEKIT_API_SECRET (wrong pair, a stray space or "
+                             "quote, or they belong to another project than LIVEKIT_URL)."})
+    return done({"configured": True, "valid": None, "problem": f"http {res.status_code}",
+                 "hint": f"LiveKit answered HTTP {res.status_code}; check LIVEKIT_URL."})
+
+
 def _missing() -> list[str]:
     return [k for k in _ENV if not os.getenv(k, "").strip()]
 
@@ -80,12 +148,13 @@ class LiveKitTransport:
 
     def describe(self) -> dict[str, Any]:
         missing = _missing()
-        return {
-            "name": self.name,
-            "label": self.label,
-            "available": not missing,
-            "reason": f"missing {', '.join(missing)} in .env" if missing else "",
-        }
+        if missing:
+            return {"name": self.name, "label": self.label, "available": False,
+                    "reason": f"missing {', '.join(missing)} in .env"}
+        check = check_credentials()
+        bad = check["valid"] is False
+        return {"name": self.name, "label": self.label, "available": not bad,
+                "reason": check["hint"] if bad else ""}
 
     def join(
         self, *, session_id: str, language: str, voice: dict[str, Any] | None = None,
