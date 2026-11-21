@@ -134,6 +134,7 @@ button, select, input { font: inherit; color: inherit; }
 .privacy-chip__icon svg { width: 0.62rem; height: 0.62rem; }
 .privacy-chip--local { color: #1e8a43; }
 .privacy-chip--eu { color: inherit; opacity: 0.85; }
+.privacy-chip--eu .privacy-chip__icon { color: #d9a400; opacity: 1; }
 .privacy-chip--world { color: #c62828; }
 .privacy-chip:hover .privacy-chip__label { text-decoration: underline; }
 .privacy-chip:focus-visible { outline: 2px solid var(--vi-berry); outline-offset: 1px; border-radius: 0.3rem; }

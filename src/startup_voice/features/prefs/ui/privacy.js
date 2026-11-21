@@ -3,7 +3,7 @@
  * the founder's words — LLM (text), TTS (voice out), STT (voice in) — where does the data go?
  *
  *   local  green lock   runs on this device (browser model / Whisper / local Ollama): nothing leaves it
- *   eu     flag         a cloud service inside the EU/EEA/CH: the data leaves the device, stays in Europe
+ *   eu     yellow lock  a cloud service inside the EU/EEA/CH: the data leaves the device, stays in Europe
  *   world  red flag     a cloud service outside the EU, or unknown: shown red on purpose
  *
  * Pure function describePrivacy() (testable); renderPrivacyBadges() only paints the result.
@@ -44,7 +44,7 @@ function cloud(code, de, deText, enText) {
   const where = c ? countryName(c, de) : (de ? "Standort unbekannt" : "location unknown");
   return {
     level,
-    icon: flagEmoji(c),
+    icon: level === "eu" ? LOCK : flagEmoji(c), // inside Europe: a (yellow) lock, not a flag
     text: `${de ? deText : enText} — ${where}. ${
       de ? "Die Daten verlassen dein Gerät." : "The data leaves your device."
     }`,
