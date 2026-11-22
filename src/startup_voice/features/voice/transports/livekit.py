@@ -18,6 +18,7 @@ import json
 import os
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 
 from startup_voice.features.voice.transports.base import TransportUnavailable
@@ -135,6 +136,35 @@ def check_credentials(*, force: bool = False, timeout: float = 4.0) -> dict[str,
                  "hint": f"LiveKit answered HTTP {res.status_code}; check LIVEKIT_URL."})
 
 
+_HEARTBEAT_MAX_AGE_S = 45.0
+
+
+def heartbeat_path() -> Path:
+    """File the voice worker touches every few seconds while it is registered with LiveKit."""
+    return Path(os.getenv("LIVEKIT_HEARTBEAT_FILE") or "data/livekit-worker.alive")
+
+
+def worker_state() -> str:
+    """Is a voice worker there to answer a call? "external" | "alive" | "missing".
+
+    The worker is a separate process; without it a joined call just waits. ``LIVEKIT_WORKER=external``
+    says it runs somewhere else (another machine, a container) so this app cannot see it.
+    """
+    if os.getenv("LIVEKIT_WORKER", "").strip().lower() in {"external", "1", "true", "on", "yes"}:
+        return "external"
+    try:
+        age = time.time() - heartbeat_path().stat().st_mtime
+    except OSError:
+        return "missing"
+    return "alive" if age < _HEARTBEAT_MAX_AGE_S else "missing"
+
+
+WORKER_MISSING_HINT = (
+    "The LiveKit voice worker is not running. Start the app with ./run.sh (it starts the worker), "
+    "or set LIVEKIT_WORKER=external if it runs somewhere else."
+)
+
+
 def _missing() -> list[str]:
     return [k for k in _ENV if not os.getenv(k, "").strip()]
 
@@ -144,7 +174,7 @@ class LiveKitTransport:
     label = "LiveKit (hands-free)"
 
     def available(self) -> bool:
-        return not _missing()
+        return not _missing() and worker_state() != "missing"
 
     def describe(self) -> dict[str, Any]:
         missing = _missing()
@@ -152,9 +182,11 @@ class LiveKitTransport:
             return {"name": self.name, "label": self.label, "available": False,
                     "reason": f"missing {', '.join(missing)} in .env"}
         check = check_credentials()
-        bad = check["valid"] is False
-        return {"name": self.name, "label": self.label, "available": not bad,
-                "reason": check["hint"] if bad else ""}
+        if check["valid"] is False:
+            return {"name": self.name, "label": self.label, "available": False, "reason": check["hint"]}
+        if worker_state() == "missing":
+            return {"name": self.name, "label": self.label, "available": False, "reason": WORKER_MISSING_HINT}
+        return {"name": self.name, "label": self.label, "available": True, "reason": ""}
 
     def join(
         self, *, session_id: str, language: str, voice: dict[str, Any] | None = None,
@@ -163,6 +195,8 @@ class LiveKitTransport:
         missing = _missing()
         if missing:
             raise TransportUnavailable(f"LiveKit is not configured: missing {', '.join(missing)}")
+        if worker_state() == "missing":
+            raise TransportUnavailable(WORKER_MISSING_HINT)
         # One room per call: a stale room from an earlier call can never swallow this one,
         # and the worker is dispatched fresh. The session id travels in participant metadata.
         room = f"intake-{session_id}-{secrets.token_hex(3)}"

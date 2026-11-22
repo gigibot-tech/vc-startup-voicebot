@@ -991,3 +991,31 @@ test("a late worker TTS error after Unterbrechen does not replay the whole reply
   ttsDown(t.lk);
   assert.equal(t.base.calls.filter((c) => c[0] === "speak" || c[0] === "pushSpeakStream" || c[0] === "beginSpeakStream").length, 0);
 });
+
+// ---------- a worker that never answers takes the live mode away -------------------------------
+
+test("when the voice worker never answers, the live mode stops being offered and the call falls back", async () => {
+  const lk = fakeLiveKit({ autoReady: false });
+  let unavailable = 0;
+  const t = setup({ lk, readyTimeoutMs: 30 });
+  // the real app passes this callback; setup() does not, so wire a second driver instance here
+  const voice = createLiveKitVoice({
+    base: t.base, prefs: { voice: true }, getLanguage: () => "de-DE", getSessionId: () => "s1", canListen: () => true,
+    onTranscript() {}, onAbort() {}, api: async () => ({ url: "ws://x", token: "tok" }), loadClient: async () => lk.client,
+    readyTimeoutMs: 30, onUnavailable: () => { unavailable += 1; },
+  });
+  voice.onMicClick();
+  await sleep(120);
+  assert.equal(unavailable, 1);
+  assert.equal(voice.isConnected(), false);
+  assert.match(t.base.calls.filter((c) => c[0] === "setVoicePhase").at(-1)[2], /Antippen & sprechen/);
+});
+
+test("the voice switch can drop a mode that failed", () => {
+  const sw = createVoiceSwitch({ drivers: { classic: Object.fromEntries(METHODS.map((m) => [m, () => {}])), livekit: Object.fromEntries(METHODS.map((m) => [m, () => {}])) }, getPreferred: () => "livekit" });
+  sw.setAvailableModes(["livekit"]);
+  assert.equal(sw.getMode(), "livekit");
+  sw.markUnavailable("livekit");
+  assert.equal(sw.isAvailable("livekit"), false);
+  assert.equal(sw.getMode(), "classic");
+});

@@ -35,6 +35,7 @@ def _clean_env(monkeypatch):
 def _configure_livekit(monkeypatch):
     for key, value in LK_ENV.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.setenv("LIVEKIT_WORKER", "external")  # a worker is "there" (see test_livekit_worker_presence)
 
 
 def _jwt_parts(token: str):

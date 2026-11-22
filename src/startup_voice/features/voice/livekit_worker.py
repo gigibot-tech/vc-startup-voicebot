@@ -29,6 +29,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from dotenv import load_dotenv
@@ -187,6 +188,27 @@ def _parse_metadata(raw: str) -> dict[str, Any]:
 
 
 server = AgentServer()
+
+
+@server.on("worker_started")
+def _start_heartbeat() -> None:
+    """Tell the web app this worker is up (it greys out the live mode otherwise). See worker_state()."""
+    from startup_voice.features.voice.transports.livekit import heartbeat_path
+
+    async def beat() -> None:
+        path = heartbeat_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        while True:
+            try:
+                path.write_text(str(time.time()))
+            except OSError as exc:
+                log.warning("cannot write the worker heartbeat %s: %s", path, exc)
+            await asyncio.sleep(10)
+
+    _background.add(asyncio.ensure_future(beat()))
+
+
+_background: set[asyncio.Task] = set()
 
 
 def prewarm(proc: JobProcess) -> None:

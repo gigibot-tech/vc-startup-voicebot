@@ -56,6 +56,11 @@ const boardBlobs = isNetlify ? lazyStore("startup-voice-board") : null;
 // the voice worker that listens/speaks is a separate always-on process (it cannot run on Netlify).
 const lkEnv = () => ({ url: (process.env.LIVEKIT_URL || "").trim(), key: (process.env.LIVEKIT_API_KEY || "").trim(), secret: (process.env.LIVEKIT_API_SECRET || "").trim() });
 const lkMissing = () => { const e = lkEnv(); return [["LIVEKIT_URL", e.url], ["LIVEKIT_API_KEY", e.key], ["LIVEKIT_API_SECRET", e.secret]].filter(([, v]) => !v).map(([k]) => k); };
+// The voice worker is a separate always-on process that cannot run on Netlify. This site can only
+// offer the live mode when YOU say a worker runs somewhere (LIVEKIT_WORKER=external), else a call
+// would join a room nobody answers ("Sprach-Agent antwortet nicht").
+const lkWorkerDeclared = () => /^(external|1|true|on|yes)$/i.test((process.env.LIVEKIT_WORKER || "").trim());
+const LK_WORKER_HINT = "No LiveKit voice worker is declared. Run the worker somewhere (./run.sh on a computer, or a server) and set LIVEKIT_WORKER=external in the Netlify environment variables.";
 const b64url = (buf) => Buffer.from(buf).toString("base64url");
 function lkToken(claims) {
   const { key, secret } = lkEnv(), now = Math.floor(Date.now() / 1000);
@@ -628,19 +633,22 @@ export default async function handler(request) {
     if (path === "/health" && method === "GET") {
       const sessions = await listSessions();
       const speechReady = Boolean(process.env.ELEVENLABS_API_KEY);
-      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], ...(() => { const c = llmConfig(); return c.missing.length ? { llm_provider: "none", llm_model: "", llm_region: "", llm_missing: c.missing } : { llm_provider: c.provider, llm_model: c.model, llm_region: c.provider === "scaleway" ? "FR" : String(process.env.LLM_REGION || "").trim().toUpperCase() }; })(), voice_settings: {}, voice_modes: lkMissing().length ? ["classic"] : ["classic", "livekit"], voice_mode: "classic" });
+      return json({ ok: true, sessions: sessions.length, data_dir: "Netlify Blobs (Frankfurt)", tts: speechReady ? "elevenlabs" : "missing_key", stt: "browser", stt_providers: speechReady ? ["elevenlabs", "browser"] : ["browser"], ...(() => { const c = llmConfig(); return c.missing.length ? { llm_provider: "none", llm_model: "", llm_region: "", llm_missing: c.missing } : { llm_provider: c.provider, llm_model: c.model, llm_region: c.provider === "scaleway" ? "FR" : String(process.env.LLM_REGION || "").trim().toUpperCase() }; })(), voice_settings: {}, voice_modes: lkMissing().length || !lkWorkerDeclared() ? ["classic"] : ["classic", "livekit"], voice_mode: "classic" });
     }
     if (path === "/api/dossier-schema" && method === "GET") return json(schemaResponse());
     if (path === "/api/ido/config" && method === "GET") return json({ origins: String(process.env.IDO_ORIGINS || "").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean) });
     if (path === "/api/voice/transports" && method === "GET") {
       const missing = lkMissing(), check = missing.length ? null : await lkCheck();
-      const bad = missing.length > 0 || check.valid === false;
-      return json({ default: "classic", transports: [{ id: "classic", name: "classic", available: true }, { id: "livekit", name: "livekit", available: !bad, reason: missing.length ? `missing ${missing.join(", ")}` : (check.valid === false ? check.hint : "") }] });
+      const noWorker = !lkWorkerDeclared();
+      const bad = missing.length > 0 || check.valid === false || noWorker;
+      const reason = missing.length ? `missing ${missing.join(", ")}` : (check.valid === false ? check.hint : (noWorker ? LK_WORKER_HINT : ""));
+      return json({ default: "classic", transports: [{ id: "classic", name: "classic", available: true }, { id: "livekit", name: "livekit", available: !bad, reason }] });
     }
     if (path === "/api/voice/livekit-check" && method === "GET") return json(await lkCheck(true));
     if (path === "/api/voice/join" && method === "POST") {
       const b = await request.json().catch(() => ({}));
       if (lkMissing().length) return error(`LiveKit is not configured: missing ${lkMissing().join(", ")}`, 503);
+      if (!lkWorkerDeclared()) return error(LK_WORKER_HINT, 503);
       if (String(b.mode || "livekit") !== "livekit") return error("Unknown voice mode", 400);
       await loadSession(String(b.session_id || "")); // 404 for an unknown session
       const room = `intake-${b.session_id}-${randomBytes(3).toString("hex")}`, identity = `founder-${randomBytes(4).toString("hex")}`;

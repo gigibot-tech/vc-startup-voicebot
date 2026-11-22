@@ -95,6 +95,8 @@ const livekitVoice = createLiveKitVoice({
   base: classicVoice,
   getSessionId: activeId,
   cues: createCues({ isEnabled: () => prefs.cues !== false }),
+  // The call's worker never answered: stop offering the live mode (back to push-to-talk) until reload.
+  onUnavailable: () => { voice.markUnavailable("livekit"); void settings.syncVoiceModeUi(); },
   // Settings > STT = "Whisper (Browser)": in a call the browser transcribes (local Transformers.js
   // Whisper) and the worker only speaks. Any other STT choice: the worker listens.
   browserStt: {

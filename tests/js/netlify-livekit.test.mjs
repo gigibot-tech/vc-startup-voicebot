@@ -12,6 +12,7 @@ try {
 }
 
 const SECRET = "s".repeat(40);
+process.env.LIVEKIT_WORKER = "external";
 const verify = (jwt) => {
   const [h, p, sig] = jwt.split(".");
   const ok = createHmac("sha256", SECRET).update(`${h}.${p}`).digest("base64url") === sig;
@@ -73,7 +74,24 @@ if (handler) {
     assert.equal((await call("/api/voice/livekit-check")).body.problem, "url");
   });
 
+  test("without a declared worker the live mode is not offered (it would time out)", async () => {
+    await withFakeLiveKit(200, async (url) => {
+      Object.assign(process.env, { LIVEKIT_URL: url, LIVEKIT_API_KEY: "APIkey", LIVEKIT_API_SECRET: SECRET });
+      delete process.env.LIVEKIT_WORKER;
+      await call("/api/voice/livekit-check"); // refresh the cached credential check (valid)
+      const t = (await call("/api/voice/transports")).body.transports.find((x) => x.name === "livekit");
+      assert.equal(t.available, false);
+      assert.match(t.reason, /LIVEKIT_WORKER=external/);
+      assert.deepEqual((await call("/health")).body.voice_modes, ["classic"]);
+      assert.equal((await call("/api/voice/join", { method: "POST", body: JSON.stringify({ session_id: "x" }) })).status, 503);
+      process.env.LIVEKIT_WORKER = "external";
+      assert.deepEqual((await call("/health")).body.voice_modes, ["classic", "livekit"]);
+      assert.equal((await call("/api/voice/transports")).body.transports.find((x) => x.name === "livekit").available, true);
+    });
+  });
+
   test("join mints a token LiveKit's verifier accepts, with the room grant", async () => {
+    process.env.LIVEKIT_WORKER = "external";
     Object.assign(process.env, { LIVEKIT_URL: "wss://x.livekit.cloud", LIVEKIT_API_KEY: "APIkey", LIVEKIT_API_SECRET: SECRET });
     const created = await call("/api/sessions", { method: "POST", body: "{}" });
     const sid = created.body.session.id;

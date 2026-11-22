@@ -4,7 +4,7 @@ import { clamp01, clampSpeed } from "../../shared/format.js";
 
 const PREFS_KEY = "startupVoicePrefs";
 /** Bump when defaults for chrome layout change so old localStorage picks them up once. */
-const PREFS_VERSION = 3;
+const PREFS_VERSION = 4;
 
 const DEFAULTS = {
   lang: "de-DE", voice: true, speed: 1, auto: false, theme: "light",
@@ -15,8 +15,8 @@ const DEFAULTS = {
   voiceMode: "",
   /** short signal tones in a hands-free call (your turn / got it / call ended) */
   cues: true,
-  /** local = downloadable Transformers.js TTS (default); browser = Web Speech; elevenlabs = cloud */
-  tts: "local",
+  /** browser = Web Speech (default, robust); local = downloadable Transformers.js TTS (experimental); elevenlabs = cloud */
+  tts: "browser",
   stability: 0.45, similarity: 0.75,
   /** ollama = server LLM; transformers = browser WebGPU via Transformers.js */
   llm: "ollama",
@@ -35,7 +35,9 @@ const stored = readStored();
 if (stored._v !== PREFS_VERSION) {
   delete stored.prefsOpen;
   delete stored.sidebarOpen;
-  if (!stored.tts) stored.tts = "local";
+  // v4: the default voice is the browser's own (robust, nothing to download). "local" used to be the
+  // default, so it cannot tell a choice from a default: it is reset once (re-pick it in Settings).
+  if (!stored.tts || stored.tts === "local" || stored.tts === "transformers") stored.tts = "browser";
   stored._v = PREFS_VERSION;
 }
 
@@ -56,7 +58,7 @@ if (prefs.llm === "transformers") prefs.llm = "lfm3-1.7b";
 if (!BROWSER_LLM_VALUES.has(prefs.llm) && prefs.llm !== "ollama") prefs.llm = "ollama";
 if (!["", "classic", "livekit"].includes(prefs.voiceMode)) prefs.voiceMode = "";
 if (prefs.tts === "transformers") prefs.tts = "local";
-if (!["local", "browser", "elevenlabs"].includes(prefs.tts)) prefs.tts = "local";
+if (!["local", "browser", "elevenlabs"].includes(prefs.tts)) prefs.tts = "browser";
 prefs._v = PREFS_VERSION;
 
 export const isBrowserLlm = (v = prefs.llm) => BROWSER_LLM_VALUES.has(v);

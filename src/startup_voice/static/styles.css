@@ -970,9 +970,16 @@ button.logo:focus-visible { outline: 2px solid var(--vi-berry); outline-offset: 
    one-line overflow hide it — the sidebar list is the picker. */
 .topbar--overflow .top-session-pick { display: none !important; }
 @media (max-width: 720px) {
-  .topbar { padding: 0.65rem 0.85rem; }
-  .logo span { display: none; }
+  /* Phone header: title + language + dark mode + Einstellungen must all be visible.
+     The sidebar is off on small screens (conversations are picked on the home screen: tap the title),
+     the dossier-position toggle means nothing in a single column, and the row may wrap. */
+  .app, .app.sidebar-collapsed { grid-template-columns: 0 1fr !important; }
+  .app .sidebar, .sidebar-toggle, .layout-toggles [data-pref="dossier"] { display: none !important; }
+  .topbar { padding: 0.65rem 0.85rem; flex-wrap: wrap; row-gap: 0.4rem; overflow: visible; }
+  .nav-actions { flex-wrap: wrap; flex: 1 1 auto; justify-content: flex-end; row-gap: 0.4rem; }
+  .settings-cluster { max-width: 100%; }
   .top-session-pick { display: none !important; }
+  .logo span { display: none; }
   .prefs-bar { padding: 0.5rem 0.85rem; }
   .chat-scroll, .dossier-panel { padding-left: 0.85rem; padding-right: 0.85rem; }
 }

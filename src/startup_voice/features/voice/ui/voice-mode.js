@@ -59,6 +59,12 @@ export function createVoiceSwitch({ drivers, getPreferred, getServerDefault = ()
       available = new Set([DEFAULT_MODE, ...(Array.isArray(list) ? list : [])]);
       return refresh();
     },
+    /** A mode that was offered but did not work (e.g. its worker never answered): stop offering it. */
+    markUnavailable(mode) {
+      if (mode === DEFAULT_MODE) return current;
+      available.delete(mode);
+      return refresh();
+    },
     /** Call after the user changed the preference. */
     refresh,
     getMode: () => current,

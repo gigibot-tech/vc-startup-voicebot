@@ -11,6 +11,7 @@ def env(monkeypatch):
     monkeypatch.setenv("LIVEKIT_URL", "wss://demo.livekit.cloud")
     monkeypatch.setenv("LIVEKIT_API_KEY", "APIkey123")
     monkeypatch.setenv("LIVEKIT_API_SECRET", "s" * 40)
+    monkeypatch.setenv("LIVEKIT_WORKER", "external")
     lk._check_cache.update(at=0.0, result=None)
 
 
@@ -61,3 +62,30 @@ def test_missing_variables_are_named(monkeypatch):
     monkeypatch.setenv("LIVEKIT_API_SECRET", "")
     r = lk.check_credentials(force=True)
     assert r["problem"] == "missing" and "LIVEKIT_API_SECRET" in r["hint"]
+
+
+def test_livekit_needs_a_running_worker(monkeypatch, tmp_path):
+    """Credentials alone are not enough: without a worker a call would just wait and time out."""
+    monkeypatch.delenv("LIVEKIT_WORKER", raising=False)
+    beat = tmp_path / "alive"
+    monkeypatch.setenv("LIVEKIT_HEARTBEAT_FILE", str(beat))
+    _answer(monkeypatch, 200)
+    t = lk.LiveKitTransport()
+    assert lk.worker_state() == "missing"
+    assert t.available() is False
+    assert "worker" in t.describe()["reason"].lower()
+    with pytest.raises(lk.TransportUnavailable):
+        t.join(session_id="s", language="de")
+
+    beat.write_text("1")  # the worker's heartbeat
+    assert lk.worker_state() == "alive" and t.available() is True
+    assert t.describe()["available"] is True
+
+    import os, time
+    os.utime(beat, (time.time() - 120, time.time() - 120))  # heartbeat stopped: the worker died
+    assert lk.worker_state() == "missing"
+
+
+def test_a_worker_elsewhere_can_be_declared(monkeypatch):
+    monkeypatch.setenv("LIVEKIT_WORKER", "external")
+    assert lk.worker_state() == "external"

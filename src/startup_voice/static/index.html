@@ -150,7 +150,7 @@
             <label class="setting setting-row"><span>STT</span>
               <select id="sttSel" aria-label="Speech recognition">
                 <option value="elevenlabs">ElevenLabs</option>
-                <option value="whisper" data-i18n="sttOptWhisper">Whisper – lokales Modell im Browser</option>
+                <option value="whisper" data-i18n="sttOptWhisper">Whisper – lokales Modell (experimentell)</option>
                 <option value="deepgram">Deepgram</option>
                 <option value="browser" data-i18n="sttOptBrowser">Browser (Web Speech) – Standard</option>
               </select>
@@ -176,8 +176,8 @@
             <span class="prefs-group-label" data-i18n="ttsLabel">Sprachausgabe (TTS)</span>
             <label class="setting setting-row"><span>TTS</span>
               <select id="ttsSel" aria-label="Text to speech">
-                <option value="local" selected data-i18n="ttsOptLocal">Stimme im Browser (lädt einmalig, Standard)</option>
-                <option value="browser" data-i18n="ttsOptBrowser">Stimme des Betriebssystems (Web Speech)</option>
+                <option value="browser" selected data-i18n="ttsOptBrowser">Stimme des Browsers (Web Speech) – Standard</option>
+                <option value="local" data-i18n="ttsOptLocal">Lokale Stimme (experimentell, lädt einmalig)</option>
                 <option value="elevenlabs">ElevenLabs</option>
               </select>
             </label>

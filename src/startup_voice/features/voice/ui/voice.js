@@ -88,6 +88,7 @@
 import { api } from "../../shared/api.js";
 import { clampSpeed, fmtTime, langTag } from "../../shared/format.js";
 import { createNoiseGate } from "./wave-gate.js";
+import { createSilenceEnd } from "./silence-end.js";
 
 const PREFLIGHT_TTL_MS = 20000;
 
@@ -1126,15 +1127,23 @@ export function createVoice({
     activeRecognition = recognition;
     recognition.lang = langTag(getLanguage());
     recognition.interimResults = true;
-    // Continuous until Stop (#listenStopBtn / mic) — no silence auto-send.
+    // Web Speech has no end-of-speech event of its own: we end the turn ourselves one short pause after
+    // the last word (silence-end.js), so it behaves like a voice bot. Stop / mic still sends at once.
     recognition.continuous = true;
     let finalText = "";
+    const endTimer = createSilenceEnd({
+      onQuiet: () => {
+        if (activeRecognition !== recognition || voicePhase !== "listening") return;
+        browserStopRequested = true; // onend below sends what was heard
+        try { recognition.stop(); } catch { /* already stopped */ }
+      },
+    });
     // Enter "listening" immediately so the UI NEVER gets stuck on "Verarbeitet… (Abbrechen)"!
-    setVoicePhase("listening", "Listening (Web Speech)… · Stop to send");
+    setVoicePhase("listening", "Listening… · sends after a pause (or tap Stop)");
     paintSttPreview("");
     recognition.onstart = () => {
       if (activeRecognition === recognition) {
-        setVoicePhase("listening", "Listening (Web Speech)… · Stop to send");
+        setVoicePhase("listening", "Listening… · sends after a pause (or tap Stop)");
       }
     };
     recognition.onresult = (ev) => {
@@ -1144,8 +1153,10 @@ export function createVoice({
         if (ev.results[i].isFinal) finalText += `${t} `; else interim += t;
       }
       paintSttPreview(`${finalText}${interim}`);
+      if (`${finalText}${interim}`.trim()) endTimer.touch();
     };
     recognition.onerror = (ev) => {
+      endTimer.cancel();
       const errCode = String(ev?.error || "");
       // Ignore benign 'no-speech' / 'aborted' while waiting for Stop.
       if ((errCode === "no-speech" || errCode === "aborted") && !browserStopRequested && voicePhase === "listening") {
@@ -1174,6 +1185,7 @@ export function createVoice({
       }
     };
     recognition.onend = async () => {
+      endTimer.cancel();
       // Chrome stops SpeechRecognition on pauses even with continuous=true; if the user hasn't
       // pressed Stop yet, restart seamlessly and keep accumulating finalText!
       if (!browserStopRequested && voicePhase === "listening" && activeRecognition === recognition) {

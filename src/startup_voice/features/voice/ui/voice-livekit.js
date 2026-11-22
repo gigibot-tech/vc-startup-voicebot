@@ -136,7 +136,7 @@ const liveUi = (state) => {
 export function createLiveKitVoice({
   base, prefs, getLanguage, getSessionId, canListen, onTranscript, onAbort, confirmInterrupt,
   api, loadClient = loadLiveKit, readyTimeoutMs = READY_TIMEOUT_MS, browserStt = null, cues = null,
-  voiceStartTimeoutMs = VOICE_START_TIMEOUT_MS, webSpeech = null,
+  voiceStartTimeoutMs = VOICE_START_TIMEOUT_MS, webSpeech = null, onUnavailable = null,
 }) {
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -574,8 +574,8 @@ export function createLiveKitVoice({
         readyResolve = resolve;
         setTimeout(() => {
           const err = new Error(tx(
-            "Sprach-Agent antwortet nicht – läuft der LiveKit-Worker? (siehe README)",
-            "Voice agent not responding – is the LiveKit worker running? (see README)",
+            "Sprach-Agent antwortet nicht – läuft der LiveKit-Worker? Ich bleibe bei „Antippen & sprechen“.",
+            "Voice agent not responding – is the LiveKit worker running? Staying with “Tap & talk”.",
           ));
           err.explained = true; // already says what to do: no prefix
           reject(err);
@@ -613,6 +613,8 @@ export function createLiveKitVoice({
       if (stale()) return; // cancelled by the founder: cancelConnect() already cleaned up
       cleanup();
       const msg = String(err?.message || err);
+      // The worker never answered: do not keep offering a mode that cannot work right now.
+      if (err?.explained) onUnavailable?.(msg);
       showError(err?.explained ? msg : `${tx("LiveKit-Verbindung fehlgeschlagen: ", "LiveKit connection failed: ")}${msg}`);
     }
   }

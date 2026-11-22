@@ -58,7 +58,7 @@ export function createChat({ voice, sessions }) {
   let inFlightExtractPromise = null;
 
   /** Append one chat bubble (both assistant & user as bubbles + timestamp + optional ctx warning). */
-  function addQa(role, text, ts, warning = "") {
+  function addQa(role, text, ts, warning = "", { scroll = true } = {}) {
     const wrap = document.createElement("div");
     wrap.className = "team-qa";
     const body = esc(text);
@@ -84,8 +84,35 @@ export function createChat({ voice, sessions }) {
           </div>
         </div>`;
     qaList.appendChild(wrap);
-    chatScroll.scrollTop = chatScroll.scrollHeight;
+    // While renderChat() rebuilds the whole list, reading scrollHeight here would force a layout of
+    // the EMPTY list and the browser would clamp the scroll position to the top (the "jumps to top
+    // after sending" bug). renderChat restores the position itself.
+    if (scroll) scrollToLatest();
     return wrap;
+  }
+
+  /**
+   * Which element scrolls the chat depends on the layout: .chat-scroll (dossier at the side) or
+   * .main-col (dossier below, phones). Setting chatScroll.scrollTop alone does nothing in the second
+   * case, so bring the newest bubble into view instead (works for every scroll container).
+   */
+  function scrollToLatest() {
+    qaList.lastElementChild?.scrollIntoView({ block: "nearest" });
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+  }
+
+  /** Every scrollable ancestor of the chat, with where it is now (and whether it sits at the end). */
+  function captureScroll() {
+    const els = [];
+    for (let el = chatScroll; el && el !== document.documentElement; el = el.parentElement) {
+      if (/(auto|scroll)/.test(getComputedStyle(el).overflowY)) els.push(el);
+    }
+    if (document.scrollingElement) els.push(document.scrollingElement);
+    return els.map((el) => ({ el, top: el.scrollTop, atEnd: el.scrollHeight - el.scrollTop - el.clientHeight < 80 }));
+  }
+
+  function restoreScroll(saved) {
+    for (const { el, top, atEnd } of saved) el.scrollTop = atEnd ? el.scrollHeight : top;
   }
 
   /** Attach or update the inline token/context warning inside an existing assistant bubble. */
@@ -131,7 +158,7 @@ export function createChat({ voice, sessions }) {
     </div>`;
     qaList.appendChild(wrap);
     placeSpeakDock();
-    chatScroll.scrollTop = chatScroll.scrollHeight;
+    scrollToLatest();
     return wrap;
   }
 
@@ -160,7 +187,7 @@ export function createChat({ voice, sessions }) {
     const q = wrap.querySelector(".team-qa__q");
     q.textContent = text;
     placeSpeakDock();
-    chatScroll.scrollTop = chatScroll.scrollHeight;
+    scrollToLatest();
     return q;
   }
 
@@ -420,6 +447,7 @@ export function createChat({ voice, sessions }) {
   function renderChat(session) {
     placeSpeakDock(); // out of qaList before wipe
     const liveBubble = qaList.querySelector(".team-qa--live");
+    const savedScroll = captureScroll();
     qaList.innerHTML = "";
     if (!session) {
       placeSpeakDock();
@@ -431,7 +459,7 @@ export function createChat({ voice, sessions }) {
       ? appState.turnError
       : null;
     msgs.forEach((m, i) => {
-      const wrap = addQa(m.role === "assistant" ? "assistant" : "user", m.content, m.ts, m.warning || "");
+      const wrap = addQa(m.role === "assistant" ? "assistant" : "user", m.content, m.ts, m.warning || "", { scroll: false });
       const isFailedUser = failText && i === msgs.length - 1 && m.role === "user";
       if (!isFailedUser) return;
       wrap.classList.add("is-error");
@@ -452,6 +480,7 @@ export function createChat({ voice, sessions }) {
     if (liveBubble && !qaList.querySelector(".team-qa--live")) {
       qaList.appendChild(liveBubble);
     }
+    restoreScroll(savedScroll); // the list was emptied and refilled: put the view back where it was
   }
 
   /**
@@ -612,7 +641,7 @@ export function createChat({ voice, sessions }) {
           } else if (!unlockedForSpeak) {
             bubble.textContent = streamed;
           }
-          chatScroll.scrollTop = chatScroll.scrollHeight;
+          scrollToLatest();
         },
         onReplyDone: async (replyRaw) => {
           if (nav.isStale(seq, id) || myAbort.signal.aborted) return;
@@ -837,7 +866,7 @@ export function createChat({ voice, sessions }) {
           } else if (!unlockedForSpeak) {
             bubble.textContent = streamed;
           }
-          chatScroll.scrollTop = chatScroll.scrollHeight;
+          scrollToLatest();
         },
         { signal: turnAbort.signal },
       );
